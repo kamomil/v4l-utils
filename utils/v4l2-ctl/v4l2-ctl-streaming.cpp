@@ -783,7 +783,7 @@ restart:
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
 		unsigned buf_len = len;
-		unsigned sz;
+		unsigned sz = 0;
 
 		if (from_with_hdr) {
 			printf("fill_buffer_from_file: dafna: in loop in from_with_header block\n");
@@ -796,6 +796,9 @@ restart:
 		}
 
 		const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(pixelformat);
+
+		//tmp hack - assume that if the out buff is NOT fwht it means we are encoding, so we fill the buffer
+		// with raw frames and therefore need paddings
 		if(vic_fmt && pixelformat != v4l2_fourcc('F','W','H','T')) {
 			len = (cropped_width*cropped_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
 			unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
@@ -819,17 +822,18 @@ restart:
 				printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
 				for(unsigned i=0; i < cropped_height/h_div; i++) {
 					unsigned wsz = fread(buf_p, 1, cropped_width/w_div, fin);
-					buf_p += coded_width/w_div;
-					if(wsz == 0)
+					if(wsz == 0 && i == 0 && comp_idx == 0)
 						break;
-					if(wsz != 0 && wsz != cropped_width/w_div) {
+					if(wsz != cropped_width/w_div) {
 						fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, cropped_width/w_div, wsz);
 						return false;
 					}
 					sz += wsz;
+					buf_p += coded_width/w_div;
 				}
 				if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
 					break;
+				buf_p += coded_width * (coded_height - cropped_height) / h_div;
 			}
 		}
 		else
@@ -1072,8 +1076,71 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			}
 			if (host_fd_to >= 0)
 				sz = fwrite(comp_ptr[j] + offset, 1, used, fout);
-			else
-				sz = fwrite((u8 *)q.g_dataptr(buf.g_index(), j) + offset, 1, used, fout);
+			else {
+				/*
+				struct v4l2_fwht_pixfmt_info {
+					u32 id;
+					unsigned int bytesperline_mult;
+					unsigned int sizeimage_mult;
+					unsigned int sizeimage_div;
+					unsigned int luma_alpha_step;
+					unsigned int chroma_step;
+					unsigned int width_div;
+					unsigned int height_div;
+					unsigned int components_num;
+				};
+				*/
+				//tmp hack - assume that if the out buff is fwht it means we are decoding, so we write raw frames to the file
+				// and therefore need paddings
+				const struct v4l2_fwht_pixfmt_info v = {0,0,3,2,1,1,2,2,3};
+				const struct v4l2_fwht_pixfmt_info *vic_fmt = &v;
+				//const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(pixelformat);
+				if(pixelformat == v4l2_fourcc('F','W','H','T')) {
+					unsigned v_w = 1920;
+					unsigned v_h = 1080;
+					unsigned c_w = 1920;
+					unsigned c_h = 1080;
+						//len = (cropped_width*cropped_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+					unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+
+
+					printf("do_handle_cap: w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,  vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
+					//if(len == 0) {
+					//	fprintf(stderr, "error cropped dimensions are not set\n");
+					//	return false;
+					//}
+
+					//if(buf_len != coded_len) {
+					//	fprintf(stderr, "buf_len (%u) is not equal to coded_len (%u) (%ux%u)\n", buf_len, coded_len, coded_width, coded_height);
+					//	return false;
+					//}
+					u8 *buf_p = (u8 *)q.g_dataptr(buf.g_index(), j) + offset;
+					printf("do_handle_cap: dafna: padding: cropped: %ux%u, coded = %ux%u\n", v_w, v_h, coded_width, coded_height);
+					sz = 0;
+					for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
+						unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
+						unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
+						printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
+						for(unsigned i=0; i < v_h/h_div; i++) {
+							unsigned wsz = fwrite(buf_p, 1, v_w/w_div, fout);
+							if(wsz == 0 && i == 0 && comp_idx == 0)
+								break;
+							if(wsz != v_w/w_div) {
+								fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, cropped_width/w_div, wsz);
+								return false;
+							}
+							sz += wsz;
+							buf_p += c_w/w_div;
+						}
+						buf_p += c_w*(c_h-v_h)/h_div;
+
+						if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
+							break;
+					}
+				}
+				else
+					sz = fwrite((u8 *)q.g_dataptr(buf.g_index(), j) + offset, 1, used, fout);
+			}
 
 			if (sz != used)
 				fprintf(stderr, "%u != %u\n", sz, used);
@@ -1889,6 +1956,8 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	in.free(&fd);
 	out.free(&fd);
 	tpg_free(&tpg);
+	printf("streaming_set_m2m: wrote: %u frames to CAP\n",count[CAP]);
+	printf("streaming_set_m2m: read:  %u frames from OUT\n",count[OUT]);
 
 done:
 	if (file[CAP] && file[CAP] != stdout)
