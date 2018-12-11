@@ -1199,7 +1199,6 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 	if (fout && (!stream_skip || ignore_count_skip) &&
 	    buf.g_bytesused(0) && !(buf.g_flags() & V4L2_BUF_FLAG_ERROR))
 		write_buffer_to_file(fd, q, buf, fmt, fout);
-
 	if (buf.g_flags() & V4L2_BUF_FLAG_KEYFRAME)
 		ch = 'K';
 	else if (buf.g_flags() & V4L2_BUF_FLAG_PFRAME)
@@ -2099,6 +2098,8 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	in.free(&fd);
 	out.free(&fd);
 	tpg_free(&tpg);
+	printf("streaming_set_m2m: wrote: %u frames to CAP\n",count[CAP]);
+	printf("streaming_set_m2m: read:  %u frames from OUT\n",count[OUT]);
 
 done:
 	if (file[CAP] && file[CAP] != stdout)
