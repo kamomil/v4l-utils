@@ -20,9 +20,9 @@
 
 #include "v4l2-ctl.h"
 #include "v4l-stream.h"
-#include "codec-fwht.h"
 
 extern "C" {
+#include "codec-v4l2-fwht.h"
 #include "v4l2-tpg.h"
 }
 
@@ -72,6 +72,12 @@ static bool output_field_alt;
 static unsigned bpl_out[VIDEO_MAX_PLANES];
 static bool last_buffer = false;
 static codec_ctx *ctx;
+
+static unsigned int coded_width = 0;
+static unsigned int coded_height = 0;
+static unsigned int cropped_width = 0;
+static unsigned int cropped_height = 0;
+u32 pixelformat;
 
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
@@ -662,6 +668,7 @@ static bool fill_buffer_from_file(cv4l_queue &q, cv4l_buffer &b, FILE *fin)
 	static bool first = true;
 	static bool is_fwht = false;
 
+	printf("in fill_buffer_from_file\n");
 	if (host_fd_from >= 0) {
 		for (;;) {
 			unsigned packet = read_u32(fin);
@@ -775,17 +782,59 @@ restart:
 	for (unsigned j = 0; j < q.g_num_planes(); j++) {
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
+		unsigned buf_len = len;
 		unsigned sz;
 
 		if (from_with_hdr) {
+			printf("fill_buffer_from_file: dafna: in loop in from_with_header block\n");
 			len = read_u32(fin);
 			if (len > q.g_length(j)) {
 				fprintf(stderr, "plane size is too large (%u > %u)\n",
-					len, q.g_length(j));
+						len, q.g_length(j));
 				return false;
 			}
 		}
-		sz = fread(buf, 1, len, fin);
+
+		const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(pixelformat);
+		if(vic_fmt && pixelformat != v4l2_fourcc('F','W','H','T')) {
+			len = (cropped_width*cropped_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+			unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+
+
+			printf("w div  = %u h div = %u\n",  vic_fmt->width_div,  vic_fmt->height_div);
+			if(len == 0) {
+				fprintf(stderr, "error cropped dimensions are not set\n");
+				return false;
+			}
+
+			if(buf_len != coded_len) {
+				fprintf(stderr, "buf_len (%u) is not equal to coded_len (%u) (%ux%u)\n", buf_len, coded_len, coded_width, coded_height);
+				return false;
+			}
+			char *buf_p = (char*) buf;
+			printf("fill_buffer_from_file: dafna: padding: cropped: %ux%u, coded = %ux%u\n", cropped_width, cropped_height, coded_width, coded_height);
+			for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
+				unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
+				unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
+				printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
+				for(unsigned i=0; i < cropped_height/h_div; i++) {
+					unsigned wsz = fread(buf_p, 1, cropped_width/w_div, fin);
+					buf_p += coded_width/w_div;
+					if(wsz == 0)
+						break;
+					if(wsz != 0 && wsz != cropped_width/w_div) {
+						fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, cropped_width/w_div, wsz);
+						return false;
+					}
+					sz += wsz;
+				}
+				if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
+					break;
+			}
+		}
+		else
+			sz = fread(buf, 1, len, fin);
+
 		if (first && sz != len) {
 			fprintf(stderr, "Insufficient data\n");
 			return false;
@@ -2024,13 +2073,20 @@ done:
 		fclose(file[OUT]);
 }
 
-void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
+void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struct v4l2_selection &in_selection)
 {
 	cv4l_disable_trace dt(fd);
 	cv4l_disable_trace dt_out(out_fd);
 	int do_cap = options[OptStreamMmap] + options[OptStreamUser] + options[OptStreamDmaBuf];
 	int do_out = options[OptStreamOutMmap] + options[OptStreamOutUser] + options[OptStreamOutDmaBuf];
 
+	//TODO handle pix_mp etc
+	coded_width = vfmt.fmt.pix.width;
+	coded_height = vfmt.fmt.pix.height;
+
+	cropped_width = in_selection.r.width ? in_selection.r.width : 0;
+	cropped_height = in_selection.r.height ? in_selection.r.height : 0;
+	pixelformat = vfmt.fmt.pix.pixelformat;
 	if (out_fd.g_fd() < 0) {
 		out_capabilities = capabilities;
 		out_priv_magic = priv_magic;
@@ -2045,8 +2101,11 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 		return;
 	}
 
-	if (do_cap && do_out && out_fd.g_fd() < 0)
+	if (do_cap && do_out && out_fd.g_fd() < 0) {
+		printf("streaming_set: about to m2m\n");
+		getchar();
 		streaming_set_m2m(fd);
+	}
 	else if (do_cap && do_out)
 		streaming_set_cap2out(fd, out_fd);
 	else if (do_cap)
