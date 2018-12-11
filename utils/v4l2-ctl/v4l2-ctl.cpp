@@ -1277,13 +1277,18 @@ int main(int argc, char **argv)
 	io_set(c_fd);
 	stds_set(c_fd);
 	vidcap_set(c_fd);
-	vidout_set(c_fd);
+
+
+	 struct v4l2_format vfmt;
+	vidout_set(c_fd, vfmt);
 	overlay_set(c_fd);
 	vbi_set(c_fd);
 	sdr_set(c_fd);
 	meta_set(c_fd);
 	subdev_set(c_fd);
-	selection_set(c_fd);
+	
+	struct v4l2_selection in_selection;
+	selection_set(c_fd, in_selection);
 	misc_set(c_fd);
 	edid_set(c_fd);
 
@@ -1320,7 +1325,7 @@ int main(int argc, char **argv)
 
 	/* Special case: handled last */
 
-	streaming_set(c_fd, c_out_fd);
+	streaming_set(c_fd, c_out_fd, vfmt, in_selection);
 
 	if (options[OptWaitForEvent]) {
 		struct v4l2_event_subscription sub;

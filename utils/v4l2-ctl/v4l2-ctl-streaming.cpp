@@ -22,6 +22,7 @@
 #include "v4l-stream.h"
 
 extern "C" {
+#include "codec-v4l2-fwht.h"
 #include "v4l2-tpg.h"
 }
 
@@ -809,6 +810,7 @@ static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b,
 	static bool first = true;
 	static bool is_fwht = false;
 
+	printf("in fill_buffer_from_file\n");
 	if (host_fd_from >= 0) {
 		for (;;) {
 			unsigned packet = read_u32(fin);
@@ -922,15 +924,17 @@ restart:
 	for (unsigned j = 0; j < q.g_num_planes(); j++) {
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
+		unsigned buf_len = len;
 		unsigned sz;
 		cv4l_fmt fmt;
 
 		fd.g_fmt(fmt, q.g_type());
 		if (from_with_hdr) {
+			printf("fill_buffer_from_file: dafna: in loop in from_with_header block\n");
 			len = read_u32(fin);
 			if (len > q.g_length(j)) {
 				fprintf(stderr, "plane size is too large (%u > %u)\n",
-					len, q.g_length(j));
+						len, q.g_length(j));
 				return false;
 			}
 		}
@@ -2282,7 +2286,7 @@ done:
 		fclose(file[OUT]);
 }
 
-void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
+void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struct v4l2_selection &in_selection)
 {
 	cv4l_disable_trace dt(fd);
 	cv4l_disable_trace dt_out(out_fd);
@@ -2306,8 +2310,11 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 		return;
 	}
 
-	if (do_cap && do_out && out_fd.g_fd() < 0)
+	if (do_cap && do_out && out_fd.g_fd() < 0) {
+		printf("streaming_set: about to m2m\n");
+		getchar();
 		streaming_set_m2m(fd);
+	}
 	else if (do_cap && do_out)
 		streaming_set_cap2out(fd, out_fd);
 	else if (do_cap)
