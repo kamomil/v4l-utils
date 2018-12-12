@@ -114,6 +114,52 @@ public:
 	unsigned dropped();
 };
 
+static int is_enc(cv4l_fd &fd, bool &is_enc) {
+	struct v4l2_capability vcap;
+
+	memset(&vcap,0,sizeof(vcap));
+
+	int ret = ioctl(fd.g_fd(), VIDIOC_QUERYCAP, &vcap);
+	if(ret) {
+		fprintf(stderr, "is_enc: VIDIOC_QUERYCAP failed: %d\n", ret);
+		return ret;
+	}
+	unsigned int caps = vcap.capabilities;
+	if (caps & V4L2_CAP_DEVICE_CAPS)
+		caps = vcap.device_caps;
+	if(!(caps & V4L2_CAP_VIDEO_M2M) && !(caps & V4L2_CAP_VIDEO_M2M_MPLANE)) {
+		is_enc = false;
+		fprintf(stderr,"is_enc: not an M2M device\n");
+		return -1;
+	}
+
+	struct v4l2_fmtdesc fmt;
+	memset(&fmt,0,sizeof(fmt));
+	fmt.index = 0;
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	while ((ret = ioctl(fd.g_fd(), VIDIOC_ENUM_FMT, &fmt)) == 0) {
+		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED == 0)
+			break;
+	}
+	if (ret) {
+		is_enc = true;
+		return 0;
+	}
+	memset(&fmt,0,sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	while ((ret = ioctl(fd.g_fd(), VIDIOC_ENUM_FMT, &fmt)) == 0) {
+		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED == 0)
+			break;
+	}
+	if (ret) {
+		is_enc = false;
+		return 0;
+	}
+	fprintf(stderr, "is_enc: could no determine codec type\n");
+	return -1;
+}
+
 void fps_timestamps::determine_field(int fd, unsigned type)
 {
 	struct v4l2_format fmt = { };
