@@ -114,12 +114,12 @@ public:
 	unsigned dropped();
 };
 
-static int is_enc(cv4l_fd &fd, bool &is_enc) {
+static int is_enc(int fd, bool &is_enc) {
 	struct v4l2_capability vcap;
 
 	memset(&vcap,0,sizeof(vcap));
 
-	int ret = ioctl(fd.g_fd(), VIDIOC_QUERYCAP, &vcap);
+	int ret = ioctl(fd, VIDIOC_QUERYCAP, &vcap);
 	if(ret) {
 		fprintf(stderr, "is_enc: VIDIOC_QUERYCAP failed: %d\n", ret);
 		return ret;
@@ -138,9 +138,10 @@ static int is_enc(cv4l_fd &fd, bool &is_enc) {
 	fmt.index = 0;
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-	while ((ret = ioctl(fd.g_fd(), VIDIOC_ENUM_FMT, &fmt)) == 0) {
-		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED == 0)
+	while ((ret = ioctl(fd, VIDIOC_ENUM_FMT, &fmt)) == 0) {
+		if((fmt.flags & V4L2_FMT_FLAG_COMPRESSED) == 0)
 			break;
+		fmt.index++;
 	}
 	if (ret) {
 		is_enc = true;
@@ -148,9 +149,10 @@ static int is_enc(cv4l_fd &fd, bool &is_enc) {
 	}
 	memset(&fmt,0,sizeof(fmt));
 	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-	while ((ret = ioctl(fd.g_fd(), VIDIOC_ENUM_FMT, &fmt)) == 0) {
-		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED == 0)
+	while ((ret = ioctl(fd, VIDIOC_ENUM_FMT, &fmt)) == 0) {
+		if((fmt.flags & V4L2_FMT_FLAG_COMPRESSED) == 0)
 			break;
+		fmt.index++;
 	}
 	if (ret) {
 		is_enc = false;
@@ -2201,7 +2203,11 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struc
 
 	cropped_width = in_selection.r.width ? in_selection.r.width : 0;
 	cropped_height = in_selection.r.height ? in_selection.r.height : 0;
+	bool enc = false;
+	int r = is_enc(fd.g_fd(), enc);
+	printf("streaming_set: ret = %d, enc = %d\n",r, enc);
 	pixelformat = vfmt.fmt.pix.pixelformat;
+
 	if (out_fd.g_fd() < 0) {
 		out_capabilities = capabilities;
 		out_priv_magic = priv_magic;
