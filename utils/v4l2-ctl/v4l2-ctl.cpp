@@ -1172,6 +1172,7 @@ int main(int argc, char **argv)
 	c_fd.s_trace(options[OptSilent] ? 0 : (verbose ? 2 : 1));
 	c_out_fd.s_trace(options[OptSilent] ? 0 : (verbose ? 2 : 1));
 
+	printf("main: calling VIDIOC_QUERYCAP on %s\n", device);
 	if (!is_subdev && doioctl(fd, VIDIOC_QUERYCAP, &vcap)) {
 		fprintf(stderr, "%s: not a v4l2 node\n", device);
 		exit(1);
@@ -1200,6 +1201,7 @@ int main(int argc, char **argv)
 					strerror(errno));
 			exit(1);
 		}
+		printf("main: calling VIDIOC_QUERYCAP on %s\n", out_device);
 		if (doioctl(out_fd, VIDIOC_QUERYCAP, &vcap)) {
 			fprintf(stderr, "%s: not a v4l2 node\n", out_device);
 			exit(1);

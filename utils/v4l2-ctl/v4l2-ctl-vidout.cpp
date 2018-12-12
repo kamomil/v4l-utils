@@ -184,8 +184,10 @@ void vidout_set(cv4l_fd &_fd,  struct v4l2_format &vfmt)
 				}
 			}
 
-			if (options[OptSetVideoOutFormat])
+			if (options[OptSetVideoOutFormat]) {
+				printf("vidout_set: calling S_FMT\n");
 				ret = doioctl(fd, VIDIOC_S_FMT, &vfmt);
+			}
 			else
 				ret = doioctl(fd, VIDIOC_TRY_FMT, &vfmt);
 			if (ret == 0 && (verbose || options[OptTryVideoOutFormat]))

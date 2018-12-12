@@ -221,8 +221,10 @@ void vidcap_set(cv4l_fd &_fd)
 				}
 			}
 
-			if (options[OptSetVideoFormat])
+			if (options[OptSetVideoFormat]) {
+				printf("vidcap_set: calling S_FMT\n");
 				ret = doioctl(fd, VIDIOC_S_FMT, &vfmt);
+			}
 			else
 				ret = doioctl(fd, VIDIOC_TRY_FMT, &vfmt);
 			if (ret == 0 && (verbose || options[OptTryVideoFormat]))
