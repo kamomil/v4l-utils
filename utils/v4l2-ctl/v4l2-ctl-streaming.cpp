@@ -73,11 +73,13 @@ static unsigned bpl_out[VIDEO_MAX_PLANES];
 static bool last_buffer = false;
 static codec_ctx *ctx;
 
-static unsigned int coded_width = 0;
-static unsigned int coded_height = 0;
-static unsigned int cropped_width = 0;
-static unsigned int cropped_height = 0;
-u32 pixelformat;
+//static unsigned int coded_width = 0;
+//static unsigned int coded_height = 0;
+static unsigned int visible_width = 0;
+static unsigned int visible_height = 0;
+//u32 out_pixelformat;
+//u32 cap_pixelformat;
+bool is_enc = false;
 
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
@@ -114,7 +116,7 @@ public:
 	unsigned dropped();
 };
 
-static int is_enc(int fd, bool &is_enc) {
+static int get_codec_type(int fd, bool &is_enc) {
 	struct v4l2_capability vcap;
 
 	memset(&vcap,0,sizeof(vcap));
@@ -161,6 +163,37 @@ static int is_enc(int fd, bool &is_enc) {
 	fprintf(stderr, "is_enc: could no determine codec type\n");
 	return -1;
 }
+/*
+static int get_coded_format(int fd) {
+	struct v4l2_format vfmt;
+	memset(&vfmt, 0, sizeof(vfmt));
+
+	if(is_enc)
+		vfmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+}
+*/
+
+static int get_visible_format(int fd, unsigned int &width, unsigned int &height) {
+	int ret = 0;
+	if(is_enc) {
+		struct v4l2_selection in_selection;
+		in_selection.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		in_selection.target = V4L2_SEL_TGT_CROP;
+
+		printf("get_visible_format\n");
+		if ( (ret = ioctl(fd, VIDIOC_G_SELECTION, &in_selection)) != 0) {
+			fprintf(stderr,"error in g_selection ioctl: %d\n",ret);
+			return ret;
+		}
+		width = in_selection.r.width;
+		height = in_selection.r.height;
+	}
+	else { //TODO - this is a hack g_selection with COMPOSE should be used when implemented in driver
+		vidcap_get_orig_from_set(width, height);
+	}
+	return 0;
+}
+
 
 void fps_timestamps::determine_field(int fd, unsigned type)
 {
@@ -711,7 +744,7 @@ void streaming_cmd(int ch, char *optarg)
 	}
 }
 
-static bool fill_buffer_from_file(cv4l_queue &q, cv4l_buffer &b, FILE *fin)
+static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b, FILE *fin)
 {
 	static bool first = true;
 	static bool is_fwht = false;
@@ -843,18 +876,20 @@ restart:
 			}
 		}
 
-		const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(pixelformat);
+		if(is_enc) {
+			cv4l_fmt fmt(q.g_type());
+			fd.g_fmt(fmt, q.g_type());
 
-		//tmp hack - assume that if the out buff is NOT fwht it means we are encoding, so we fill the buffer
-		// with raw frames and therefore need paddings
-		if(vic_fmt && pixelformat != v4l2_fourcc('F','W','H','T')) {
-			len = (cropped_width*cropped_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+			unsigned coded_width = fmt.g_width();
+			unsigned coded_height = fmt.g_height();
+			const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+			len = (visible_width*visible_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
 			unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
 
 
 			printf("w div  = %u h div = %u\n",  vic_fmt->width_div,  vic_fmt->height_div);
 			if(len == 0) {
-				fprintf(stderr, "error cropped dimensions are not set\n");
+				fprintf(stderr, "error visible dimensions are not set: %ux%u\n", visible_width, visible_height);
 				return false;
 			}
 
@@ -863,17 +898,18 @@ restart:
 				return false;
 			}
 			char *buf_p = (char*) buf;
-			printf("fill_buffer_from_file: dafna: padding: cropped: %ux%u, coded = %ux%u\n", cropped_width, cropped_height, coded_width, coded_height);
+			printf("fill_buffer_from_file: dafna: padding: cropped: %ux%u, coded = %ux%u\n", visible_width, visible_height, coded_width, coded_height);
+			//getchar();
 			for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
 				unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
 				unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
 				printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
-				for(unsigned i=0; i < cropped_height/h_div; i++) {
-					unsigned wsz = fread(buf_p, 1, cropped_width/w_div, fin);
+				for(unsigned i=0; i < visible_height/h_div; i++) {
+					unsigned wsz = fread(buf_p, 1, visible_width/w_div, fin);
 					if(wsz == 0 && i == 0 && comp_idx == 0)
 						break;
-					if(wsz != cropped_width/w_div) {
-						fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, cropped_width/w_div, wsz);
+					if(wsz != visible_width/w_div) {
+						fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, visible_width/w_div, wsz);
 						return false;
 					}
 					sz += wsz;
@@ -881,7 +917,7 @@ restart:
 				}
 				if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
 					break;
-				buf_p += coded_width * (coded_height - cropped_height) / h_div;
+				buf_p += coded_width * (coded_height - visible_height) / h_div;
 			}
 		}
 		else
@@ -1009,7 +1045,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 					tpg_fillbuffer(&tpg, stream_out_std, j, (u8 *)q.g_dataptr(i, j));
 			}
 		}
-		if (fin && !fill_buffer_from_file(q, buf, fin))
+		if (fin && !fill_buffer_from_file(fd, q, buf, fin))
 			return -2;
 
 		if (qbuf) {
@@ -1125,62 +1161,35 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			if (host_fd_to >= 0)
 				sz = fwrite(comp_ptr[j] + offset, 1, used, fout);
 			else {
-				/*
-				struct v4l2_fwht_pixfmt_info {
-					u32 id;
-					unsigned int bytesperline_mult;
-					unsigned int sizeimage_mult;
-					unsigned int sizeimage_div;
-					unsigned int luma_alpha_step;
-					unsigned int chroma_step;
-					unsigned int width_div;
-					unsigned int height_div;
-					unsigned int components_num;
-				};
-				*/
-				//tmp hack - assume that if the out buff is fwht it means we are decoding, so we write raw frames to the file
-				// and therefore need paddings
-				const struct v4l2_fwht_pixfmt_info v = {0,0,3,2,1,1,2,2,3};
-				const struct v4l2_fwht_pixfmt_info *vic_fmt = &v;
-				//const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(pixelformat);
-				if(pixelformat == v4l2_fourcc('F','W','H','T')) {
-					unsigned v_w = 1920;
-					unsigned v_h = 1080;
-					unsigned c_w = 1920;
-					unsigned c_h = 1080;
-						//len = (cropped_width*cropped_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
-					unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+				if(!is_enc) {
+					cv4l_fmt fmt(q.g_type());
+					fd.g_fmt(fmt, q.g_type());
+					const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+					unsigned coded_width = fmt.g_width();
+					unsigned coded_height = fmt.g_height();
 
-
-					printf("do_handle_cap: w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,  vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
-					//if(len == 0) {
-					//	fprintf(stderr, "error cropped dimensions are not set\n");
-					//	return false;
-					//}
-
-					//if(buf_len != coded_len) {
-					//	fprintf(stderr, "buf_len (%u) is not equal to coded_len (%u) (%ux%u)\n", buf_len, coded_len, coded_width, coded_height);
-					//	return false;
-					//}
-					u8 *buf_p = (u8 *)q.g_dataptr(buf.g_index(), j) + offset;
-					printf("do_handle_cap: dafna: padding: cropped: %ux%u, coded = %ux%u\n", v_w, v_h, coded_width, coded_height);
+					printf("do_handle_cap: w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
+							vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
+										u8 *buf_p = (u8 *)q.g_dataptr(buf.g_index(), j) + offset;
+					printf("do_handle_cap: visible: %ux%u, coded = %ux%u\n", visible_width, visible_height, coded_width, coded_height);
+					//getchar();
 					sz = 0;
 					for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
 						unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
 						unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
 						printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
-						for(unsigned i=0; i < v_h/h_div; i++) {
-							unsigned wsz = fwrite(buf_p, 1, v_w/w_div, fout);
+						for(unsigned i=0; i < visible_height/h_div; i++) {
+							unsigned wsz = fwrite(buf_p, 1, visible_width/w_div, fout);
 							if(wsz == 0 && i == 0 && comp_idx == 0)
 								break;
-							if(wsz != v_w/w_div) {
-								fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, cropped_width/w_div, wsz);
+							if(wsz != visible_width/w_div) {
+								fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, visible_width/w_div, wsz);
 								return false;
 							}
 							sz += wsz;
-							buf_p += c_w/w_div;
+							buf_p += coded_width/w_div;
 						}
-						buf_p += c_w*(c_h-v_h)/h_div;
+						buf_p += coded_width*(coded_height-visible_height)/h_div;
 
 						if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
 							break;
@@ -1294,7 +1303,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 			output_field = V4L2_FIELD_TOP;
 	}
 
-	if (fin && !fill_buffer_from_file(q, buf, fin))
+	if (fin && !fill_buffer_from_file(fd, q, buf, fin))
 		return -2;
 
 	if (!fin && stream_out_refresh) {
@@ -2198,15 +2207,23 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struc
 	int do_out = options[OptStreamOutMmap] + options[OptStreamOutUser] + options[OptStreamOutDmaBuf];
 
 	//TODO handle pix_mp etc
-	coded_width = vfmt.fmt.pix.width;
-	coded_height = vfmt.fmt.pix.height;
+	//coded_width = vfmt.fmt.pix.width;
+	//coded_height = vfmt.fmt.pix.height;
+	int r = get_codec_type(fd.g_fd(), is_enc);
+	if(r) {
+		fprintf(stderr, "error checking codec type\n");
+		return;
+	}
 
-	cropped_width = in_selection.r.width ? in_selection.r.width : 0;
-	cropped_height = in_selection.r.height ? in_selection.r.height : 0;
-	bool enc = false;
-	int r = is_enc(fd.g_fd(), enc);
-	printf("streaming_set: ret = %d, enc = %d\n",r, enc);
-	pixelformat = vfmt.fmt.pix.pixelformat;
+	r = get_visible_format(fd.g_fd(), visible_width, visible_height);
+
+	if(r) {
+		fprintf(stderr, "error getting the visible width\n");
+		return;
+	}
+
+	//printf("streaming_set: ret = %d, enc = %d\n",r, is_enc);
+	//out_pixelformat = vfmt.fmt.pix.pixelformat;
 
 	if (out_fd.g_fd() < 0) {
 		out_capabilities = capabilities;

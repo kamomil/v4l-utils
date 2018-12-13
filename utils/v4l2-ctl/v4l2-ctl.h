@@ -357,6 +357,7 @@ void vidout_cmd(int ch, char *optarg);
 void vidout_set(cv4l_fd &fd, struct v4l2_format &vfmt);
 void vidout_get(cv4l_fd &fd);
 void vidout_list(cv4l_fd &fd);
+void vidcap_get_orig_from_set(unsigned int &r_width, unsigned int &r_height);
 
 // v4l2-ctl-overlay.cpp
 void overlay_usage(void);

@@ -89,6 +89,7 @@ static void do_crop(int fd, unsigned int set_crop, struct v4l2_rect &vcrop, v4l2
 {
 	struct v4l2_crop in_crop;
 
+	printf("in do_crop\n");
 	in_crop.type = type;
 	if (doioctl(fd, VIDIOC_G_CROP, &in_crop) == 0) {
 		if (set_crop & CropWidth)
@@ -148,6 +149,7 @@ static void do_selection(int fd, unsigned int set_selection, struct v4l2_selecti
 	in_selection.type = type;
 	in_selection.target = vsel.target;
 
+	printf("do_selection\n");
 	if (doioctl(fd, VIDIOC_G_SELECTION, &in_selection) == 0) {
 		if (set_selection & SelectionWidth)
 			in_selection.r.width = vsel.r.width;
@@ -158,6 +160,7 @@ static void do_selection(int fd, unsigned int set_selection, struct v4l2_selecti
 		if (set_selection & SelectionTop)
 			in_selection.r.top = vsel.r.top;
 		in_selection.flags = (set_selection & SelectionFlags) ? vsel.flags : 0;
+		printf("do_selection: %ux%u\n",in_selection.r.width, in_selection.r.height);
 		doioctl(fd, VIDIOC_S_SELECTION, &in_selection);
 	}
 }
@@ -167,6 +170,7 @@ static int parse_selection(char *optarg, unsigned int &set_sel, v4l2_selection &
 	char *value;
 	char *subs = optarg;
 
+	printf("in pare_selection\n");
 	while (*subs != '\0') {
 		static const char *const subopts[] = {
 			"target",
@@ -290,10 +294,12 @@ void selection_set(cv4l_fd &_fd, v4l2_selection &in_selection)
 	}
 
 	if (options[OptSetSelection]) {
+		printf("do_selection: OptSetSelection\n");
 		do_selection(fd, set_selection, vselection, V4L2_BUF_TYPE_VIDEO_CAPTURE, in_selection);
 	}
 
 	if (options[OptSetOutputSelection]) {
+		printf("do_selection: OptSetOutputSelection\n");
 		do_selection(fd, set_selection_out, vselection_out, V4L2_BUF_TYPE_VIDEO_OUTPUT, in_selection);
 	}
 }
