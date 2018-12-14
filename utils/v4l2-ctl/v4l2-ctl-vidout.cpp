@@ -209,6 +209,12 @@ void vidout_get(cv4l_fd &fd)
 	}
 }
 
+void vidout_get_orig_from_set(unsigned int &r_width, unsigned int &r_height) {
+
+	r_height = height;
+	r_width = width;
+}
+
 void vidout_list(cv4l_fd &fd)
 {
 	if (options[OptListOutFormats]) {

@@ -250,9 +250,6 @@ void vidcap_get_orig_from_set(unsigned int &r_width, unsigned int &r_height) {
 
 	r_height = height;
 	r_width = width;
-	//r_pixfmt = pixfmt;
-	//if (r_pixfmt < 256)
-	//	r_pixfmt = find_pixel_format(fd, r_pixfmt,false, false);
 }
 
 
