@@ -779,9 +779,22 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 	}
 	sz = 0;
 	switch(vic_fmt->id) {
+	case V4L2_PIX_FMT_YUYV:
+	case V4L2_PIX_FMT_YVYU:
+	case V4L2_PIX_FMT_UYVY:
+	case V4L2_PIX_FMT_VYUY:
 	case V4L2_PIX_FMT_RGB24:
+	case V4L2_PIX_FMT_HSV24:
+	case V4L2_PIX_FMT_BGR24:
+	case V4L2_PIX_FMT_RGB32:
+	case V4L2_PIX_FMT_XRGB32:
+	case V4L2_PIX_FMT_HSV32:
+	case V4L2_PIX_FMT_BGR32:
+	case V4L2_PIX_FMT_XBGR32:
+	case V4L2_PIX_FMT_ARGB32:
+	case V4L2_PIX_FMT_ABGR32:
 		for(unsigned i=0; i < real_height; i++) {
-			unsigned int consume_sz = vic_fmt->chroma_step*real_width;
+			unsigned int consume_sz = vic_fmt->bytesperline_mult*real_width;
 			unsigned int wsz = 0;
 			if(is_read)
 				wsz = fread(buf_p, 1, consume_sz, fpointer);
@@ -798,13 +811,49 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 			buf_p += vic_fmt->chroma_step*coded_width;
 		}
 	break;
+
+	case V4L2_PIX_FMT_NV12:
+	case V4L2_PIX_FMT_NV16:
+	case V4L2_PIX_FMT_NV24:
+	case V4L2_PIX_FMT_NV21:
+	case V4L2_PIX_FMT_NV61:
+	case V4L2_PIX_FMT_NV42:
+		for(unsigned plane_idx = 0; plane_idx < 2; plane_idx++) {
+			unsigned h_div = (plane_idx == 0) ? 1 : vic_fmt->height_div;
+			unsigned w_div = (plane_idx == 0) ? 1 : vic_fmt->width_div;
+			unsigned step  =  (plane_idx == 0) ? vic_fmt->luma_alpha_step : vic_fmt->chroma_step;
+			printf("plane %u divs %u %u %u\n", plane_idx, w_div, h_div, step);
+			for(unsigned i=0; i <  real_height/h_div; i++) {
+				unsigned int wsz = 0;
+				if(is_read)
+					wsz = fread(buf_p, 1, step * real_width / w_div, fpointer);
+				else
+					wsz = fwrite(buf_p, 1, step * real_width / w_div, fpointer);
+				if(wsz == 0 && i == 0 && plane_idx == 0)
+					break;
+				if(wsz != step * real_width/w_div) {
+					fprintf(stderr, "error reading %uth row: tried reading %u, got %u\n", i, real_width/w_div, wsz);
+					return false;
+				}
+				sz += wsz;
+				buf_p += step*coded_width/w_div;
+			}
+			buf_p += (coded_width / w_div) * (coded_height - real_height) / h_div;
+
+			if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
+				break;
+		}
+	
+	break;
 	case V4L2_PIX_FMT_YUV420:
+	case V4L2_PIX_FMT_YUV422P:
+	case V4L2_PIX_FMT_YVU420:
 		for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
-			unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
-			unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
-			unsigned step  =  (comp_idx == 0 || comp_idx == 3) ? vic_fmt->luma_alpha_step : vic_fmt->chroma_step;
-			printf("plane %u divs %u %u %u\n", comp_idx, w_div, h_div, step);
-			for(unsigned i=0; i < step * real_height/h_div; i++) {
+			unsigned h_div = (comp_idx == 0) ? 1 : vic_fmt->height_div;
+			unsigned w_div = (comp_idx == 0) ? 1 : vic_fmt->width_div;
+
+			printf("plane %u divs %u %u %u\n", comp_idx, w_div, h_div);
+			for(unsigned i=0; i < real_height/h_div; i++) {
 				unsigned int wsz = 0;
 				if(is_read)
 					wsz = fread(buf_p, 1, real_width/w_div, fpointer);
