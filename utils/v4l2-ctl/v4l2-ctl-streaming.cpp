@@ -171,7 +171,8 @@ static int get_coded_format(int fd) {
 }
 */
 
-static int get_frame_dims(unsigned int &frame_width, unsigned int &frame_height) {
+static void get_frame_dims(unsigned int &frame_width, unsigned int &frame_height) {
+
 	if(is_enc)
 		vidout_get_orig_from_set(frame_width, frame_height);
 	else
@@ -748,7 +749,137 @@ void streaming_cmd(int ch, char *optarg)
 		break;
 	}
 }
+bool write_from_padding(cv4l_fd &fd, cv4l_queue &q, FILE *fout, unsigned char* buf, unsigned &sz)
+{
 
+	printf("write from padding\n");
+
+	cv4l_fmt fmt(q.g_type());
+	fd.g_fmt(fmt, q.g_type());
+	const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+	unsigned coded_width = fmt.g_width();
+	unsigned coded_height = fmt.g_height();
+
+	printf("do_handle_cap: w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
+			vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
+	u8 *buf_p = buf;
+	printf("do_handle_cap: visible: %ux%u, coded = %ux%u\n", visible_width, visible_height, coded_width, coded_height);
+	//getchar();
+	sz = 0;
+	switch(vic_fmt->id) {
+	case V4L2_PIX_FMT_RGB24:
+		for(unsigned i=0; i < visible_height; i++) {
+			unsigned int write_sz = vic_fmt->chroma_step*visible_width;
+			unsigned int wsz = fwrite(buf_p, 1, write_sz, fout);
+			if(wsz == 0 && i == 0)
+				break;
+			if(wsz != write_sz) {
+				fprintf(stderr, "Insufficient data %u %u %u\n", wsz, write_sz, ferror(fout));
+				fprintf(stderr, "%u %u %u\n", buf_p[0], buf_p[1], buf_p[2]);
+				return false;
+			}
+			sz += wsz;
+			buf_p += vic_fmt->chroma_step*coded_width;
+		}
+	break;
+
+	case V4L2_PIX_FMT_YUV420:
+		for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
+			unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
+			unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
+			printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
+			for(unsigned i=0; i < visible_height/h_div; i++) {
+				unsigned wsz = fwrite(buf_p, 1, visible_width/w_div, fout);
+				if(wsz == 0 && i == 0 && comp_idx == 0)
+					break;
+				if(wsz != visible_width/w_div) {
+					fprintf(stderr, "error reading %uth row: tried reading %u, got %u\n", i, visible_width/w_div, wsz);
+					return false;
+				}
+				sz += wsz;
+				buf_p += coded_width/w_div;
+			}
+			buf_p += (coded_width/w_div)*(coded_height-visible_height)/h_div;
+
+			if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
+				break;
+		}
+		break;
+	default:
+		fprintf(stderr,"the format is not supported yet\n");
+		return false;
+	}
+}
+
+bool fill_with_padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fin, unsigned &sz)
+{
+	cv4l_fmt fmt(q.g_type());
+	fd.g_fmt(fmt, q.g_type());
+
+	//unsigned buf_len = q.g_length(j);
+	unsigned coded_width = fmt.g_width();
+	unsigned coded_height = fmt.g_height();
+	const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+	//unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
+
+	printf("w div  = %u h div = %u\n",  vic_fmt->width_div,  vic_fmt->height_div);
+
+	//if(buf_len != coded_len) {
+	//	fprintf(stderr, "buf_len (%u) is not equal to coded_len (%u) (%ux%u)\n", buf_len, coded_len, coded_width, coded_height);
+	//	return false;
+	//}
+	unsigned char *buf_p = (unsigned char*) buf;
+	printf("fill_with_padding: dafna: cropped: %ux%u, coded = %ux%u, image dims: %ux%u\n", visible_width, visible_height, coded_width, coded_height, frame_width, frame_height);
+
+	switch(vic_fmt->id) {
+	case V4L2_PIX_FMT_RGB24:
+		for(unsigned i=0; i < frame_height; i++) {
+			unsigned int read_sz = vic_fmt->chroma_step*frame_width;
+			unsigned int wsz = fread(buf_p, 1, read_sz, fin);
+			if(wsz == 0 && i == 0)
+				break;
+			if(wsz != read_sz) {
+				fprintf(stderr, "Insufficient data %u %u %u\n", wsz, read_sz, ferror(fin));
+				fprintf(stderr, "%u %u %u\n", buf_p[0], buf_p[1], buf_p[2]);
+				return false;
+			}
+			sz += wsz;
+			buf_p += vic_fmt->chroma_step*coded_width;
+		}
+		break;
+	case V4L2_PIX_FMT_YUV420:
+		for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
+			unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
+			unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
+			unsigned step  =  (comp_idx == 0 || comp_idx == 3) ? vic_fmt->luma_alpha_step : vic_fmt->chroma_step;
+			printf("plane %u divs %u %u %u\n", comp_idx, w_div, h_div, step);
+			for(unsigned i=0; i < step*frame_height/h_div; i++) {
+				unsigned wsz = fread(buf_p, 1, frame_width/w_div, fin);
+				if(wsz == 0 && i == 0 && comp_idx == 0)
+					break;
+				if(wsz != frame_width/w_div) {
+					fprintf(stderr, "error reading %uth raw: suppose to read %u bytes but got %u\n", i, visible_width/w_div, wsz);
+					return false;
+				}
+				sz += wsz;
+				buf_p += coded_width/w_div;
+			}
+			if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
+				break;
+			buf_p += (coded_width / w_div) * (coded_height - frame_height) / h_div;
+		}
+		break;
+	default:
+		fprintf(stderr,"the format is not supported yet\n");
+		return false;
+	}
+
+	buf_p = (unsigned char*) buf;
+	printf("buf[0] = %u\n", buf_p[0]);
+	printf("buf[1] = %u\n", buf_p[1]);
+	printf("buf[%u] = %u\n", coded_width,buf_p[coded_width]);
+	return true;
+}
 static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b, FILE *fin)
 {
 	static bool first = true;
@@ -868,7 +999,6 @@ restart:
 	for (unsigned j = 0; j < q.g_num_planes(); j++) {
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
-		unsigned buf_len = len;
 		unsigned sz = 0;
 
 		if (from_with_hdr) {
@@ -882,57 +1012,15 @@ restart:
 		}
 
 		if(is_enc) {
-			cv4l_fmt fmt(q.g_type());
-			fd.g_fmt(fmt, q.g_type());
-
-			unsigned coded_width = fmt.g_width();
-			unsigned coded_height = fmt.g_height();
-			const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
-			len = (frame_width*frame_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
-			unsigned coded_len = (coded_width*coded_height*vic_fmt->sizeimage_mult)/vic_fmt->sizeimage_div;
-
-
-			printf("w div  = %u h div = %u\n",  vic_fmt->width_div,  vic_fmt->height_div);
-			if(len == 0) {
-				fprintf(stderr, "error visible dimensions are not set: %ux%u\n", visible_width, visible_height);
+			if(!fill_with_padding(fd, q, (unsigned char*) buf, fin, sz))
 				return false;
-			}
-
-			if(buf_len != coded_len) {
-				fprintf(stderr, "buf_len (%u) is not equal to coded_len (%u) (%ux%u)\n", buf_len, coded_len, coded_width, coded_height);
-				return false;
-			}
-			unsigned char *buf_p = (unsigned char*) buf;
-			printf("fill_buffer_from_file: dafna: padding: cropped: %ux%u, coded = %ux%u, image dims: %ux%u\n", visible_width, visible_height, coded_width, coded_height, frame_width, frame_height);
-			for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
-				unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
-				unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
-				printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
-				for(unsigned i=0; i < frame_height/h_div; i++) {
-					unsigned wsz = fread(buf_p, 1, frame_width/w_div, fin);
-					if(wsz == 0 && i == 0 && comp_idx == 0)
-						break;
-					if(wsz != frame_width/w_div) {
-						fprintf(stderr, "error reading %uth row: suppose to read %u bytes but only %u are left\n", i, visible_width/w_div, wsz);
-						return false;
-					}
-					sz += wsz;
-					buf_p += coded_width/w_div;
-				}
-				if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
-					break;
-				buf_p += (coded_width / w_div) * (coded_height - frame_height) / h_div;
-			}
-			buf_p = (unsigned char*) buf;
-			printf("buf[0] = %u\n", buf_p[0]);
-			printf("buf[1] = %u\n", buf_p[1]);
-			printf("buf[%u] = %u\n", coded_width,buf_p[coded_width]);
 		}
-		else
+		else {
 			sz = fread(buf, 1, len, fin);
+		}
 
-		if (first && sz != len) {
-			fprintf(stderr, "Insufficient data\n");
+		if (first && sz != len && !is_enc) {
+			fprintf(stderr, "Insufficient data %u %u\n",sz,len);
 			return false;
 		}
 		if (j == 0 && sz == 0 && stream_loop) {
@@ -941,13 +1029,10 @@ restart:
 			goto restart;
 		}
 		b.s_bytesused(sz, j);
-		if (sz == len)
-			continue;
 		if (sz == 0)
 			return false;
-		if (sz)
+		if (sz != len)
 			fprintf(stderr, "%u != %u\n", sz, len);
-		continue;
 	}
 	first = false;
 	return true;
@@ -1184,38 +1269,8 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 				if(!is_enc) {
 					printf("do_handle_cap 3\n");
 
-					cv4l_fmt fmt(q.g_type());
-					fd.g_fmt(fmt, q.g_type());
-					const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
-					unsigned coded_width = fmt.g_width();
-					unsigned coded_height = fmt.g_height();
-
-					printf("do_handle_cap: w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
-							vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
-					u8 *buf_p = (u8 *)q.g_dataptr(buf.g_index(), j) + offset;
-					printf("do_handle_cap: visible: %ux%u, coded = %ux%u\n", visible_width, visible_height, coded_width, coded_height);
-					//getchar();
-					sz = 0;
-					for(unsigned comp_idx = 0; comp_idx < vic_fmt->components_num; comp_idx++) {
-						unsigned h_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->height_div;
-						unsigned w_div = (comp_idx == 0 || comp_idx == 3) ? 1 : vic_fmt->width_div;
-						printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
-						for(unsigned i=0; i < visible_height/h_div; i++) {
-							unsigned wsz = fwrite(buf_p, 1, visible_width/w_div, fout);
-							if(wsz == 0 && i == 0 && comp_idx == 0)
-								break;
-							if(wsz != visible_width/w_div) {
-								fprintf(stderr, "error reading %uth row: tried reading %u, got %u\n", i, visible_width/w_div, wsz);
-								return false;
-							}
-							sz += wsz;
-							buf_p += coded_width/w_div;
-						}
-						buf_p += (coded_width/w_div)*(coded_height-visible_height)/h_div;
-
-						if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
-							break;
-					}
+					if(!write_from_padding(fd, q, fout,(u8 *)q.g_dataptr(buf.g_index(), j) + offset, sz))
+						return false;
 				}
 				else {
 					printf("do_handle_cap 4\n");
@@ -1664,6 +1719,7 @@ static void streaming_set_out(cv4l_fd &fd)
 	}
 
 	if (file_from) {
+		printf("from file = %s\n",file_from);
 		if (!strcmp(file_from, "-"))
 			fin = stdin;
 		else
@@ -1917,6 +1973,7 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	}
 
 	if (file_from) {
+		printf("file from is %s\n",file_from);
 		if (!strcmp(file_from, "-"))
 			file[OUT] = stdin;
 		else
