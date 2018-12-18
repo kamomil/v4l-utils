@@ -354,7 +354,7 @@ void vidcap_list(cv4l_fd &fd);
 // v4l2-ctl-vidout.cpp
 void vidout_usage(void);
 void vidout_cmd(int ch, char *optarg);
-void vidout_set(cv4l_fd &fd, struct v4l2_format &vfmt);
+void vidout_set(cv4l_fd &fd);
 void vidout_get(cv4l_fd &fd);
 void vidout_list(cv4l_fd &fd);
 void vidcap_get_orig_from_set(unsigned int &r_width, unsigned int &r_height);
@@ -398,7 +398,7 @@ void subdev_list(cv4l_fd &fd);
 // v4l2-ctl-selection.cpp
 void selection_usage(void);
 void selection_cmd(int ch, char *optarg);
-void selection_set(cv4l_fd &fd, v4l2_selection &in_selection);
+void selection_set(cv4l_fd &fd);
 void selection_get(cv4l_fd &fd);
 
 // v4l2-ctl-misc.cpp
@@ -412,7 +412,7 @@ void misc_get(cv4l_fd &fd);
 // v4l2-ctl-streaming.cpp
 void streaming_usage(void);
 void streaming_cmd(int ch, char *optarg);
-void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struct v4l2_selection &in_selection);
+void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd);
 void streaming_list(cv4l_fd &fd, cv4l_fd &out_fd);
 
 // v4l2-ctl-edid.cpp

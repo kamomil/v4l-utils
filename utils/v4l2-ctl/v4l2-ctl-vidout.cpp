@@ -102,12 +102,13 @@ void vidout_cmd(int ch, char *optarg)
 	}
 }
 
-void vidout_set(cv4l_fd &_fd,  struct v4l2_format &vfmt)
+void vidout_set(cv4l_fd &_fd)
 {
 	int fd = _fd.g_fd();
 	int ret;
 
 	if (options[OptSetVideoOutFormat] || options[OptTryVideoOutFormat]) {
+		struct v4l2_format vfmt;
 
 		memset(&vfmt, 0, sizeof(vfmt));
 		vfmt.fmt.pix.priv = priv_magic;
@@ -210,7 +211,6 @@ void vidout_get(cv4l_fd &fd)
 }
 
 void vidout_get_orig_from_set(unsigned int &r_width, unsigned int &r_height) {
-
 	r_height = height;
 	r_width = width;
 }

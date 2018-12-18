@@ -75,9 +75,9 @@ static codec_ctx *ctx;
 
 static unsigned int visible_width = 0;
 static unsigned int visible_height = 0;
-bool is_enc = false;
-unsigned int frame_width;
-unsigned int frame_height;
+static unsigned int frame_width = 0;
+static unsigned int frame_height = 0;
+bool is_m2m_enc = false;
 
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
@@ -121,7 +121,7 @@ static int get_codec_type(int fd, bool &is_enc) {
 
 	int ret = ioctl(fd, VIDIOC_QUERYCAP, &vcap);
 	if(ret) {
-		fprintf(stderr, "is_enc: VIDIOC_QUERYCAP failed: %d\n", ret);
+		fprintf(stderr, "get_codec_type: VIDIOC_QUERYCAP failed: %d\n", ret);
 		return ret;
 	}
 	unsigned int caps = vcap.capabilities;
@@ -129,7 +129,7 @@ static int get_codec_type(int fd, bool &is_enc) {
 		caps = vcap.device_caps;
 	if(!(caps & V4L2_CAP_VIDEO_M2M) && !(caps & V4L2_CAP_VIDEO_M2M_MPLANE)) {
 		is_enc = false;
-		fprintf(stderr,"is_enc: not an M2M device\n");
+		fprintf(stderr,"get_codec_type: not an M2M device\n");
 		return -1;
 	}
 
@@ -158,22 +158,13 @@ static int get_codec_type(int fd, bool &is_enc) {
 		is_enc = false;
 		return 0;
 	}
-	fprintf(stderr, "is_enc: could no determine codec type\n");
+	fprintf(stderr, "get_codec_type: could no determine codec type\n");
 	return -1;
 }
-/*
-static int get_coded_format(int fd) {
-	struct v4l2_format vfmt;
-	memset(&vfmt, 0, sizeof(vfmt));
-
-	if(is_enc)
-		vfmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-}
-*/
 
 static void get_frame_dims(unsigned int &frame_width, unsigned int &frame_height) {
 
-	if(is_enc)
+	if(is_m2m_enc)
 		vidout_get_orig_from_set(frame_width, frame_height);
 	else
 		vidcap_get_orig_from_set(frame_width, frame_height);
@@ -181,20 +172,21 @@ static void get_frame_dims(unsigned int &frame_width, unsigned int &frame_height
 
 static int get_visible_format(int fd, unsigned int &width, unsigned int &height) {
 	int ret = 0;
-	if(is_enc) {
+	if(is_m2m_enc) {
 		struct v4l2_selection in_selection;
+
 		in_selection.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
 		in_selection.target = V4L2_SEL_TGT_CROP;
 
 		printf("get_visible_format\n");
 		if ( (ret = ioctl(fd, VIDIOC_G_SELECTION, &in_selection)) != 0) {
-			fprintf(stderr,"error in g_selection ioctl: %d\n",ret);
+			fprintf(stderr,"get_visible_format: error in g_selection ioctl: %d\n",ret);
 			return ret;
 		}
 		width = in_selection.r.width;
 		height = in_selection.r.height;
 	}
-	else { //TODO - this is a hack g_selection with COMPOSE should be used when implemented in driver
+	else { //TODO - g_selection with COMPOSE should be used here when implemented in driver
 		vidcap_get_orig_from_set(width, height);
 	}
 	return 0;
@@ -512,7 +504,6 @@ static void print_buffer(FILE *f, struct v4l2_buffer &buf)
 			fprintf(f, "\t\tData Offset: %u\n", p->data_offset);
 		}
 	}
-			
 	fprintf(f, "\n");
 }
 
@@ -750,9 +741,8 @@ void streaming_cmd(int ch, char *optarg)
 	}
 }
 
-bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, unsigned &sz, bool is_read)
+bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, unsigned &sz, unsigned &len, bool is_read)
 {
-
 	printf("padding\n");
 
 	cv4l_fmt fmt(q.g_type());
@@ -760,7 +750,7 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 	const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
 	unsigned coded_width = fmt.g_width();
 	unsigned coded_height = fmt.g_height();
-        unsigned real_width;
+	unsigned real_width;
 	unsigned real_height;
 
 	printf("w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
@@ -778,6 +768,7 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 		real_height = visible_height;
 	}
 	sz = 0;
+	len = real_width * real_height * vic_fmt->sizeimage_mult / vic_fmt->sizeimage_div;
 	switch(vic_fmt->id) {
 	case V4L2_PIX_FMT_YUYV:
 	case V4L2_PIX_FMT_YVYU:
@@ -800,6 +791,7 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 				wsz = fread(buf_p, 1, consume_sz, fpointer);
 			else
 				wsz = fwrite(buf_p, 1, consume_sz, fpointer);
+			sz += wsz;
 			if(wsz == 0 && i == 0)
 				break;
 			if(wsz != consume_sz) {
@@ -807,7 +799,6 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 				fprintf(stderr, "%u %u %u\n", buf_p[0], buf_p[1], buf_p[2]);
 				return false;
 			}
-			sz += wsz;
 			buf_p += vic_fmt->chroma_step*coded_width;
 		}
 	break;
@@ -823,17 +814,19 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 			unsigned w_div = (plane_idx == 0) ? 1 : vic_fmt->width_div;
 			unsigned step  =  (plane_idx == 0) ? vic_fmt->luma_alpha_step : vic_fmt->chroma_step;
 			printf("plane %u divs %u %u %u\n", plane_idx, w_div, h_div, step);
+
 			for(unsigned i=0; i <  real_height/h_div; i++) {
 				unsigned int wsz = 0;
+				unsigned int consume_sz = step * real_width / w_div;
 				if(is_read)
-					wsz = fread(buf_p, 1, step * real_width / w_div, fpointer);
+					wsz = fread(buf_p, 1,  consume_sz, fpointer);
 				else
-					wsz = fwrite(buf_p, 1, step * real_width / w_div, fpointer);
+					wsz = fwrite(buf_p, 1, consume_sz, fpointer);
 				if(wsz == 0 && i == 0 && plane_idx == 0)
 					break;
-				if(wsz != step * real_width/w_div) {
-					fprintf(stderr, "error reading %uth row: tried reading %u, got %u\n", i, real_width/w_div, wsz);
-					return false;
+				if(wsz != consume_sz) {
+					fprintf(stderr, "padding: needed %u bytes, got %u\n",consume_sz, wsz);
+					return true;
 				}
 				sz += wsz;
 				buf_p += step*coded_width/w_div;
@@ -843,7 +836,6 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 			if(sz == 0)//if sz is 0 after trying to read the first plane it means we have no more frmase and inished reading the file.
 				break;
 		}
-	
 	break;
 	case V4L2_PIX_FMT_YUV420:
 	case V4L2_PIX_FMT_YUV422P:
@@ -852,18 +844,19 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 			unsigned h_div = (comp_idx == 0) ? 1 : vic_fmt->height_div;
 			unsigned w_div = (comp_idx == 0) ? 1 : vic_fmt->width_div;
 
-			printf("plane %u divs %u %u %u\n", comp_idx, w_div, h_div);
+			printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
 			for(unsigned i=0; i < real_height/h_div; i++) {
 				unsigned int wsz = 0;
+				unsigned int consume_sz = real_width/w_div;
 				if(is_read)
-					wsz = fread(buf_p, 1, real_width/w_div, fpointer);
+					wsz = fread(buf_p, 1, consume_sz, fpointer);
 				else
-					wsz = fwrite(buf_p, 1, real_width/w_div, fpointer);
+					wsz = fwrite(buf_p, 1, consume_sz, fpointer);
 				if(wsz == 0 && i == 0 && comp_idx == 0)
 					break;
-				if(wsz != real_width/w_div) {
-					fprintf(stderr, "error reading %uth row: tried reading %u, got %u\n", i, real_width/w_div, wsz);
-					return false;
+				if(wsz != consume_sz) {
+					fprintf(stderr, "padding: needed %u bytes, got %u\n",consume_sz, wsz);
+					return true;
 				}
 				sz += wsz;
 				buf_p += coded_width/w_div;
@@ -1005,28 +998,28 @@ restart:
 	for (unsigned j = 0; j < q.g_num_planes(); j++) {
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
-		unsigned sz = 0;
+		unsigned sz;
 
 		if (from_with_hdr) {
 			printf("fill_buffer_from_file: dafna: in loop in from_with_header block\n");
 			len = read_u32(fin);
 			if (len > q.g_length(j)) {
 				fprintf(stderr, "plane size is too large (%u > %u)\n",
-						len, q.g_length(j));
+					len, q.g_length(j));
 				return false;
 			}
 		}
 
-		if(is_enc) {
-			if(!padding(fd, q, (unsigned char*) buf, fin, sz, true))
+		if(is_m2m_enc) {
+			if(!padding(fd, q, (unsigned char*) buf, fin, sz, len, true))
 				return false;
 		}
 		else {
 			sz = fread(buf, 1, len, fin);
 		}
 
-		if (first && sz != len && !is_enc) {
-			fprintf(stderr, "Insufficient data %u %u\n",sz,len);
+		if (first && sz != len) {
+			fprintf(stderr, "Insufficient data\n");
 			return false;
 		}
 		if (j == 0 && sz == 0 && stream_loop) {
@@ -1035,10 +1028,13 @@ restart:
 			goto restart;
 		}
 		b.s_bytesused(sz, j);
+		if (sz == len)
+			continue;
 		if (sz == 0)
 			return false;
-		if (sz != len)
+		if (sz)
 			fprintf(stderr, "%u != %u\n", sz, len);
+		continue;
 	}
 	first = false;
 	return true;
@@ -1204,7 +1200,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 		}
 	}
 	printf("do_handle_cap 0\n");
-	
+
 	double ts_secs = buf.g_timestamp().tv_sec + buf.g_timestamp().tv_usec / 1000000.0;
 	fps_ts.add_ts(ts_secs, buf.g_sequence(), buf.g_field());
 
@@ -1272,10 +1268,10 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			else {
 				printf("do_handle_cap 2\n");
 
-				if(!is_enc) {
+				if(!is_m2m_enc) {
 					printf("do_handle_cap 3\n");
 
-					if(!padding(fd, q, (u8 *)q.g_dataptr(buf.g_index(), j) + offset, fout, sz, false))
+					if(!padding(fd, q, (u8 *)q.g_dataptr(buf.g_index(), j) + offset, fout, sz, used, false))
 						return false;
 				}
 				else {
@@ -1488,7 +1484,7 @@ static void streaming_set_cap(cv4l_fd &fd)
 		}
 		break;
 	}
-	
+
 	memset(&sub, 0, sizeof(sub));
 	sub.type = V4L2_EVENT_EOS;
 	fd.subscribe_event(sub);
@@ -2289,14 +2285,14 @@ done:
 		fclose(file[OUT]);
 }
 
-void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd, struct v4l2_format &vfmt, struct v4l2_selection &in_selection)
+void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 {
 	cv4l_disable_trace dt(fd);
 	cv4l_disable_trace dt_out(out_fd);
 	int do_cap = options[OptStreamMmap] + options[OptStreamUser] + options[OptStreamDmaBuf];
 	int do_out = options[OptStreamOutMmap] + options[OptStreamOutUser] + options[OptStreamOutDmaBuf];
 
-	int r = get_codec_type(fd.g_fd(), is_enc);
+	int r = get_codec_type(fd.g_fd(), is_m2m_enc);
 	if(r) {
 		fprintf(stderr, "error checking codec type\n");
 		return;

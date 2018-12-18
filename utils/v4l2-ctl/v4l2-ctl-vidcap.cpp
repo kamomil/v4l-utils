@@ -247,7 +247,6 @@ void vidcap_get(cv4l_fd &fd)
 }
 
 void vidcap_get_orig_from_set(unsigned int &r_width, unsigned int &r_height) {
-
 	r_height = height;
 	r_width = width;
 }

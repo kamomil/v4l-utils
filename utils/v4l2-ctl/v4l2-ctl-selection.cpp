@@ -143,8 +143,9 @@ static void parse_crop(char *optarg, unsigned int &set_crop, v4l2_rect &vcrop)
 }
 
 static void do_selection(int fd, unsigned int set_selection, struct v4l2_selection &vsel,
-			 v4l2_buf_type type, struct v4l2_selection &in_selection)
+			 v4l2_buf_type type)
 {
+	struct v4l2_selection in_selection;
 
 	in_selection.type = type;
 	in_selection.target = vsel.target;
@@ -273,7 +274,7 @@ void selection_cmd(int ch, char *optarg)
 	}
 }
 
-void selection_set(cv4l_fd &_fd, v4l2_selection &in_selection)
+void selection_set(cv4l_fd &_fd)
 {
 	int fd = _fd.g_fd();
 
@@ -295,12 +296,12 @@ void selection_set(cv4l_fd &_fd, v4l2_selection &in_selection)
 
 	if (options[OptSetSelection]) {
 		printf("do_selection: OptSetSelection\n");
-		do_selection(fd, set_selection, vselection, V4L2_BUF_TYPE_VIDEO_CAPTURE, in_selection);
+		do_selection(fd, set_selection, vselection, V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	}
 
 	if (options[OptSetOutputSelection]) {
 		printf("do_selection: OptSetOutputSelection\n");
-		do_selection(fd, set_selection_out, vselection_out, V4L2_BUF_TYPE_VIDEO_OUTPUT, in_selection);
+		do_selection(fd, set_selection_out, vselection_out, V4L2_BUF_TYPE_VIDEO_OUTPUT);
 	}
 }
 
