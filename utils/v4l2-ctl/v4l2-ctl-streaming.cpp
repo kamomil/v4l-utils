@@ -22,7 +22,6 @@
 #include "v4l-stream.h"
 
 extern "C" {
-#include "codec-v4l2-fwht.h"
 #include "v4l2-tpg.h"
 }
 
@@ -78,6 +77,7 @@ static unsigned int visible_height = 0;
 static unsigned int frame_width = 0;
 static unsigned int frame_height = 0;
 bool is_m2m_enc = false;
+bool is_m2m_dec = false;
 
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
@@ -114,51 +114,45 @@ public:
 	unsigned dropped();
 };
 
-static int get_codec_type(int fd, bool &is_enc) {
-	struct v4l2_capability vcap;
-
-	memset(&vcap,0,sizeof(vcap));
-
-	int ret = ioctl(fd, VIDIOC_QUERYCAP, &vcap);
-	if(ret) {
-		fprintf(stderr, "get_codec_type: VIDIOC_QUERYCAP failed: %d\n", ret);
-		return ret;
-	}
-	unsigned int caps = vcap.capabilities;
-	if (caps & V4L2_CAP_DEVICE_CAPS)
-		caps = vcap.device_caps;
-	if(!(caps & V4L2_CAP_VIDEO_M2M) && !(caps & V4L2_CAP_VIDEO_M2M_MPLANE)) {
-		is_enc = false;
-		fprintf(stderr,"get_codec_type: not an M2M device\n");
+static int get_codec_type(cv4l_fd &fd, bool &is_enc)
+{
+	if (!fd.has_vid_m2m())
 		return -1;
-	}
 
 	struct v4l2_fmtdesc fmt;
-	memset(&fmt,0,sizeof(fmt));
+	int num_cap_fmts = 0;
+	int num_compressed_cap_fmts = 0;
+	int num_out_fmts = 0;
+	int num_compressed_out_fmts = 0;
+
+	memset(&fmt, 0, sizeof(fmt));
 	fmt.index = 0;
 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-	while ((ret = ioctl(fd, VIDIOC_ENUM_FMT, &fmt)) == 0) {
-		if((fmt.flags & V4L2_FMT_FLAG_COMPRESSED) == 0)
-			break;
-		fmt.index++;
+	while (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) == 0) {
+		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED)
+			num_compressed_cap_fmts++;
+		num_cap_fmts++;
 	}
-	if (ret) {
+
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	while (ioctl(fd, VIDIOC_ENUM_FMT, &fmt) == 0) {
+		if(fmt.flags & V4L2_FMT_FLAG_COMPRESSED)
+			num_compressed_out_fmts++
+		num_out_fmts++;
+	}
+	if(num_compressed_out_fmts == 0 && num_compressed_cap_fmts == num_cap_fmts) {
 		is_enc = true;
 		return 0;
 	}
-	memset(&fmt,0,sizeof(fmt));
-	fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-	while ((ret = ioctl(fd, VIDIOC_ENUM_FMT, &fmt)) == 0) {
-		if((fmt.flags & V4L2_FMT_FLAG_COMPRESSED) == 0)
-			break;
-		fmt.index++;
-	}
-	if (ret) {
+
+	if(num_compressed_cap_fmts == 0 && num_compressed_out_fmts == num_out_fmts) {
 		is_enc = false;
 		return 0;
 	}
-	fprintf(stderr, "get_codec_type: could no determine codec type\n");
+
+	fprintf(stderr, "get_codec_type: driver is m2m but could no determine codec type\n");
 	return -1;
 }
 
@@ -741,7 +735,7 @@ void streaming_cmd(int ch, char *optarg)
 	}
 }
 
-bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, unsigned &sz, unsigned &len, bool is_read)
+static bool read_write_padded_frame(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, unsigned &sz, unsigned &len, bool is_read)
 {
 	printf("padding\n");
 
@@ -752,11 +746,11 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 	unsigned coded_height = fmt.g_height();
 	unsigned real_width;
 	unsigned real_height;
+	unsigned char *buf_p = (unsigned char*) buf;
 
 	printf("w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
 			vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
 
-	unsigned char *buf_p = (unsigned char*) buf;
 	printf("padding: dafna: cropped: %ux%u, coded = %ux%u, image dims: %ux%u\n", visible_width, visible_height, coded_width, coded_height, frame_width, frame_height);
 
 	if(is_read) {
@@ -844,7 +838,7 @@ bool padding(cv4l_fd &fd, cv4l_queue &q, unsigned char* buf, FILE *fpointer, uns
 			unsigned h_div = (comp_idx == 0) ? 1 : vic_fmt->height_div;
 			unsigned w_div = (comp_idx == 0) ? 1 : vic_fmt->width_div;
 
-			printf("plane %u divs %u %u\n", comp_idx, w_div, h_div);
+			printf("plane %u divs %u %u dims %u %u\n", comp_idx, w_div, h_div,real_width, real_height);
 			for(unsigned i=0; i < real_height/h_div; i++) {
 				unsigned int wsz = 0;
 				unsigned int consume_sz = real_width/w_div;
@@ -1017,7 +1011,7 @@ restart:
 		else {
 			sz = fread(buf, 1, len, fin);
 		}
-
+		//getchar();
 		if (first && sz != len) {
 			fprintf(stderr, "Insufficient data\n");
 			return false;
@@ -1157,7 +1151,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 		output_field = field;
 	return 0;
 }
-
+//TODO - add the whitespace here
 static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			 unsigned &count, fps_timestamps &fps_ts)
 {

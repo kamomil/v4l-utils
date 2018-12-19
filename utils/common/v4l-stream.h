@@ -13,6 +13,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
+
 #include <codec-v4l2-fwht.h>
 
 /* Default port */
