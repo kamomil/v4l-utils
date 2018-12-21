@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+//* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
 /*
  * V4L2 C helper header providing wrappers to simplify access to the various
  * v4l2 functions.
@@ -487,6 +487,9 @@ static inline int v4l_s_fd(struct v4l_fd *f, int fd, const char *devname, bool d
 			V4L2_SEL_TGT_CROP : V4L2_SEL_TGT_COMPOSE;
 	f->have_selection = v4l_ioctl(f, VIDIOC_G_SELECTION, &sel) != ENOTTY;
 
+	printf("v4l_s_fd: type set to %s\n", sel.type == V4L2_BUF_TYPE_VIDEO_CAPTURE  ? "cap" : "not cap");
+	printf("v4l_s_fd: sel.target set to %s\n", sel.target == V4L2_SEL_TGT_CROP ? "crop" : "compose");
+	printf("v4l_s_fd: have_selection set to %d\n",f->have_selection);
 	return f->fd;
 }
 

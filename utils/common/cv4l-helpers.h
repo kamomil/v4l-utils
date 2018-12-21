@@ -14,7 +14,7 @@
 
 #define cv4l_ioctl(cmd, arg) v4l_named_ioctl(g_v4l_fd(), #cmd, cmd, arg)
 
-class cv4l_fd : v4l_fd {
+class cv4l_fd : public v4l_fd {
 public:
 	cv4l_fd()
 	{
