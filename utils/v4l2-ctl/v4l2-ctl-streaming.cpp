@@ -20,7 +20,6 @@
 
 #include "v4l2-ctl.h"
 #include "v4l-stream.h"
-#include "codec-fwht.h"
 
 extern "C" {
 #include "v4l2-tpg.h"
@@ -72,6 +71,13 @@ static bool output_field_alt;
 static unsigned bpl_out[VIDEO_MAX_PLANES];
 static bool last_buffer = false;
 static codec_ctx *ctx;
+
+static unsigned int cropped_width = 0;
+static unsigned int cropped_height = 0;
+static unsigned int composed_width = 0;
+static unsigned int composed_height = 0;
+static bool support_cap_compose = false;
+static bool support_out_crop = false;
 
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
@@ -419,7 +425,6 @@ static void print_buffer(FILE *f, struct v4l2_buffer &buf)
 			fprintf(f, "\t\tData Offset: %u\n", p->data_offset);
 		}
 	}
-			
 	fprintf(f, "\n");
 }
 
@@ -657,11 +662,65 @@ void streaming_cmd(int ch, char *optarg)
 	}
 }
 
-static bool fill_buffer_from_file(cv4l_queue &q, cv4l_buffer &b, FILE *fin)
+static void read_write_padded_frame(cv4l_fmt &fmt, cv4l_queue &q, unsigned char* buf, FILE *fpointer, unsigned &sz, unsigned &len, bool is_read)
+{
+	printf("%s\n",__func__);
+
+	const struct v4l2_fwht_pixfmt_info *vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+
+	unsigned coded_width = fmt.g_width();
+	unsigned coded_height = fmt.g_height();
+	unsigned real_width;
+	unsigned real_height;
+	unsigned char *buf_p = (unsigned char*) buf;
+
+	printf("w div = %u h div = %u sz mult %u sz div %u\n",  vic_fmt->width_div,
+			vic_fmt->height_div, vic_fmt->sizeimage_mult, vic_fmt->sizeimage_div);
+
+	if(is_read) {
+		real_width  = cropped_width;
+		real_height = cropped_height;
+	}
+	else {
+		real_width  = composed_width;
+		real_height = composed_height;
+	}
+	printf("padding: dafna: cropped: %ux%u, coded = %ux%u, composed: %ux%u\n", cropped_width, cropped_height, coded_width, coded_height, composed_width, composed_height);
+	sz = 0;
+	len = real_width * real_height * vic_fmt->sizeimage_mult / vic_fmt->sizeimage_div;
+	for(unsigned plane_idx = 0; plane_idx < vic_fmt->planes_num; plane_idx++) {
+		unsigned h_div = (plane_idx == 0 || plane_idx == 3) ? 1 : vic_fmt->height_div;
+		unsigned w_div = (plane_idx == 0 || plane_idx == 3) ? 1 : vic_fmt->width_div;
+		unsigned step  = (plane_idx == 0 || plane_idx == 3) ? vic_fmt->luma_alpha_step : vic_fmt->chroma_step;
+		printf("plane %d, div: %ux%u, step: %u\n",plane_idx, w_div, h_div, step);
+		for(unsigned i=0; i <  real_height/h_div; i++) {
+			unsigned int wsz = 0;
+			unsigned int consume_sz = step * real_width / w_div;
+			if(is_read)
+				wsz = fread(buf_p, 1, consume_sz, fpointer);
+			else
+				wsz = fwrite(buf_p, 1, consume_sz, fpointer);
+			if(wsz == 0 && i == 0 && plane_idx == 0)
+				break;
+			if(wsz != consume_sz) {
+				fprintf(stderr, "padding: needed %u bytes, got %u\n",consume_sz, wsz);
+				return;
+			}
+			sz += wsz;
+			buf_p += step * coded_width / w_div;
+		}
+		buf_p += (step * coded_width / w_div) * (coded_height - real_height) / h_div;
+		if(sz == 0)
+			break;
+	}
+}
+
+static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b, FILE *fin)
 {
 	static bool first = true;
 	static bool is_fwht = false;
 
+	printf("in fill_buffer_from_file\n");
 	if (host_fd_from >= 0) {
 		for (;;) {
 			unsigned packet = read_u32(fin);
@@ -776,8 +835,11 @@ restart:
 		void *buf = q.g_dataptr(b.g_index(), j);
 		unsigned len = q.g_length(j);
 		unsigned sz;
+		cv4l_fmt fmt;
+		fd.g_fmt(fmt, q.g_type());
 
 		if (from_with_hdr) {
+			printf("fill_buffer_from_file: dafna: in loop in from_with_header block\n");
 			len = read_u32(fin);
 			if (len > q.g_length(j)) {
 				fprintf(stderr, "plane size is too large (%u > %u)\n",
@@ -785,7 +847,13 @@ restart:
 				return false;
 			}
 		}
-		sz = fread(buf, 1, len, fin);
+
+		if(support_out_crop && v4l2_fwht_find_pixfmt(fmt.g_pixelformat()))
+			read_write_padded_frame(fmt, q, (unsigned char*) buf, fin, sz, len, true);
+		else
+			sz = fread(buf, 1, len, fin);
+
+		//getchar();
 		if (first && sz != len) {
 			fprintf(stderr, "Insufficient data\n");
 			return false;
@@ -908,7 +976,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 					tpg_fillbuffer(&tpg, stream_out_std, j, (u8 *)q.g_dataptr(i, j));
 			}
 		}
-		if (fin && !fill_buffer_from_file(q, buf, fin))
+		if (fin && !fill_buffer_from_file(fd, q, buf, fin))
 			return -2;
 
 		if (qbuf) {
@@ -925,8 +993,8 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 		output_field = field;
 	return 0;
 }
-
-static void write_buffer_to_file(cv4l_queue &q, cv4l_buffer &buf, FILE *fout)
+//TODO - add the whitespace here
+static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf, FILE *fout)
 {
 #ifndef NO_STREAM_TO
 	unsigned comp_size[VIDEO_MAX_PLANES];
@@ -967,6 +1035,8 @@ static void write_buffer_to_file(cv4l_queue &q, cv4l_buffer &buf, FILE *fout)
 		__u32 used = buf.g_bytesused();
 		unsigned offset = buf.g_data_offset();
 		unsigned sz;
+		cv4l_fmt fmt;
+		fd.g_fmt(fmt, q.g_type());
 
 		if (offset > used) {
 			// Should never happen
@@ -983,10 +1053,18 @@ static void write_buffer_to_file(cv4l_queue &q, cv4l_buffer &buf, FILE *fout)
 		} else if (to_with_hdr) {
 			write_u32(fout, used);
 		}
-		if (host_fd_to >= 0)
+
+		if (host_fd_to >= 0) {
 			sz = fwrite(comp_ptr[j] + offset, 1, used, fout);
-		else
+			printf("do_handle_cap 1\n");
+		}
+		else if(support_cap_compose && v4l2_fwht_find_pixfmt(fmt.g_pixelformat())) {
+			read_write_padded_frame(fmt, q, (u8 *)q.g_dataptr(buf.g_index(), j) + offset, fout, sz, used, false);
+		}
+		else {
+			printf("do_handle_cap 4\n");
 			sz = fwrite((u8 *)q.g_dataptr(buf.g_index(), j) + offset, 1, used, fout);
+		}
 
 		if (sz != used)
 			fprintf(stderr, "%u != %u\n", sz, used);
@@ -1009,12 +1087,17 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 	 */
 	bool ignore_count_skip = fd.has_vid_m2m();
 
+	printf("do_handle_cap\n");
 	for (;;) {
 		ret = fd.dqbuf(buf);
-		if (ret == EAGAIN)
+		if (ret == EAGAIN) {
+			printf("do_handle_cap 11\n");
 			return 0;
-		if (ret == EPIPE)
+		}
+		if (ret == EPIPE) {
+			printf("do_handle_cap 22\n");
 			return -2;
+		}
 		if (ret) {
 			fprintf(stderr, "%s: failed: %s\n", "VIDIOC_DQBUF", strerror(errno));
 			return -1;
@@ -1027,16 +1110,19 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			break;
 		if (verbose)
 			print_concise_buffer(stderr, buf, fps_ts, -1);
-		if (fd.qbuf(buf))
+		if (fd.qbuf(buf)) {
+			printf("do_handle_cap 33\n");
 			return -1;
+		}
 	}
-	
+	printf("do_handle_cap 0\n");
+
 	double ts_secs = buf.g_timestamp().tv_sec + buf.g_timestamp().tv_usec / 1000000.0;
 	fps_ts.add_ts(ts_secs, buf.g_sequence(), buf.g_field());
 
 	if (fout && (!stream_skip || ignore_count_skip) &&
 	    buf.g_bytesused(0) && !(buf.g_flags() & V4L2_BUF_FLAG_ERROR))
-		write_buffer_to_file(q, buf, fout);
+		write_buffer_to_file(fd, q, buf, fout);
 
 	if (buf.g_flags() & V4L2_BUF_FLAG_KEYFRAME)
 		ch = 'K';
@@ -1053,6 +1139,8 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 		return -1;
 	if (index)
 		*index = buf.g_index();
+
+	printf("do_handle_cap 5\n");
 
 	if (!verbose) {
 		fprintf(stderr, "%c", ch);
@@ -1135,7 +1223,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 			output_field = V4L2_FIELD_TOP;
 	}
 
-	if (fin && !fill_buffer_from_file(q, buf, fin))
+	if (fin && !fill_buffer_from_file(fd, q, buf, fin))
 		return -2;
 
 	if (!fin && stream_out_refresh) {
@@ -1232,7 +1320,7 @@ static void streaming_set_cap(cv4l_fd &fd)
 		}
 		break;
 	}
-	
+
 	memset(&sub, 0, sizeof(sub));
 	sub.type = V4L2_EVENT_EOS;
 	fd.subscribe_event(sub);
@@ -1469,6 +1557,7 @@ static void streaming_set_out(cv4l_fd &fd)
 	}
 
 	if (file_from) {
+		printf("from file = %s\n",file_from);
 		if (!strcmp(file_from, "-"))
 			fin = stdin;
 		else
@@ -1722,6 +1811,7 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	}
 
 	if (file_from) {
+		printf("file from is %s\n",file_from);
 		if (!strcmp(file_from, "-"))
 			file[OUT] = stdin;
 		else
@@ -1845,6 +1935,8 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	in.free(&fd);
 	out.free(&fd);
 	tpg_free(&tpg);
+	printf("streaming_set_m2m: wrote: %u frames to CAP\n",count[CAP]);
+	printf("streaming_set_m2m: read:  %u frames from OUT\n",count[OUT]);
 
 done:
 	if (file[CAP] && file[CAP] != stdout)
@@ -2028,6 +2120,64 @@ done:
 	if (file[OUT] && file[OUT] != stdin)
 		fclose(file[OUT]);
 }
+static int is_support_compose_on_cap(cv4l_fd &fd) {
+	v4l2_selection sel;
+
+	memset(&sel, 0, sizeof(sel));
+	sel.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	sel.target = V4L2_SEL_TGT_COMPOSE;
+
+	if(fd.g_selection(sel) == 0) {
+		support_cap_compose = true;
+		composed_width = sel.r.width;
+		composed_height = sel.r.height;
+		return 0;
+	}
+
+	memset(&sel, 0, sizeof(sel));
+	sel.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	sel.target = V4L2_SEL_TGT_COMPOSE;
+
+	if(fd.g_selection(sel) == 0) {
+		support_cap_compose = true;
+		composed_width = sel.r.width;
+		composed_height = sel.r.height;
+		return 0;
+	}
+
+	support_cap_compose = false;
+	return 0;
+}
+
+
+static int is_support_crop_on_out(cv4l_fd &fd) {
+	v4l2_selection sel;
+
+	memset(&sel, 0, sizeof(sel));
+	sel.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	sel.target = V4L2_SEL_TGT_CROP;
+
+	if(fd.g_selection(sel) == 0) {
+		support_out_crop = true;
+		cropped_width = sel.r.width;
+		cropped_height = sel.r.height;
+		return 0;
+	}
+
+	memset(&sel, 0, sizeof(sel));
+	sel.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	sel.target = V4L2_SEL_TGT_CROP;
+
+	if(fd.g_selection(sel) == 0) {
+		support_out_crop = true;
+		cropped_width = sel.r.width;
+		cropped_height = sel.r.height;
+		return 0;
+	}
+
+	support_out_crop = false;
+	return 0;
+}
 
 void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 {
@@ -2035,6 +2185,9 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 	cv4l_disable_trace dt_out(out_fd);
 	int do_cap = options[OptStreamMmap] + options[OptStreamUser] + options[OptStreamDmaBuf];
 	int do_out = options[OptStreamOutMmap] + options[OptStreamOutUser] + options[OptStreamOutDmaBuf];
+
+	is_support_crop_on_out(fd);
+	is_support_compose_on_cap(fd);
 
 	if (out_fd.g_fd() < 0) {
 		out_capabilities = capabilities;
@@ -2050,8 +2203,11 @@ void streaming_set(cv4l_fd &fd, cv4l_fd &out_fd)
 		return;
 	}
 
-	if (do_cap && do_out && out_fd.g_fd() < 0)
+	if (do_cap && do_out && out_fd.g_fd() < 0) {
+		printf("streaming_set: about to m2m\n");
+		//getchar();
 		streaming_set_m2m(fd);
+	}
 	else if (do_cap && do_out)
 		streaming_set_cap2out(fd, out_fd);
 	else if (do_cap)
