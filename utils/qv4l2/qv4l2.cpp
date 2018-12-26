@@ -496,7 +496,9 @@ void ApplicationWindow::ctrlEvent()
 {
 	v4l2_event ev;
 
+	printf("%s: danfa\n",__func__);
 	while (dqevent(ev) == 0) {
+		printf("%s: danfa in while\n",__func__);
 		if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
 			m_genTab->sourceChange(ev);
 			continue;

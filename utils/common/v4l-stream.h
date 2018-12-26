@@ -9,11 +9,12 @@
 #define _V4L_STREAM_H_
 
 #include <linux/videodev2.h>
-#include <codec-v4l2-fwht.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
+
+#include <codec-v4l2-fwht.h>
 
 /* Default port */
 #define V4L_STREAM_PORT 8362

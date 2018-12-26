@@ -302,6 +302,7 @@ void GeneralTab::sourceChangeSubscribe()
 {
 	v4l2_input vin;
 
+	printf("%s: danfa\n",__func__);
 	if (!enum_input(vin, true)) {
 		do {
 			struct v4l2_event_subscription sub = {

@@ -617,6 +617,7 @@ void ApplicationWindow::updateCtrlRange(unsigned id, __s32 new_val)
 
 void ApplicationWindow::subscribeCtrlEvents()
 {
+	printf("%s: danfa\n",__func__);
 	for (ClassMap::iterator iter = m_classMap.begin(); iter != m_classMap.end(); ++iter) {
 		for (unsigned i = 0; i < m_classMap[iter->first].size(); i++) {
 			unsigned id = m_classMap[iter->first][i];
