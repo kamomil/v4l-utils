@@ -197,6 +197,7 @@ static struct option long_options[] = {
 	{"set-selection", required_argument, 0, OptSetSelection},
 	{"get-selection-output", required_argument, 0, OptGetOutputSelection},
 	{"set-selection-output", required_argument, 0, OptSetOutputSelection},
+	{"set-fmt-video-stream", required_argument, 0, OptSetVideoFormatStream},
 	{"get-subdev-selection", required_argument, 0, OptGetSubDevSelection},
 	{"set-subdev-selection", required_argument, 0, OptSetSubDevSelection},
 	{"try-subdev-selection", required_argument, 0, OptTrySubDevSelection},
