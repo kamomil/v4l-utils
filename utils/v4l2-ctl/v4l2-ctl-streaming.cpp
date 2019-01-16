@@ -47,7 +47,7 @@ static v4l2_std_id stream_out_std;
 static bool stream_out_refresh;
 static tpg_move_mode stream_out_hor_mode = TPG_MOVE_NONE;
 static tpg_move_mode stream_out_vert_mode = TPG_MOVE_NONE;
-static unsigned reqbufs_count_cap = 4;
+static unsigned reqbufs_count_cap = 40;
 static unsigned reqbufs_count_out = 4;
 static char *file_to;
 static bool to_with_hdr;
@@ -783,27 +783,11 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 	const struct v4l2_fwht_pixfmt_info *vic_fmt;
 	const static struct v4l2_fwht_pixfmt_info *old_info = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
 	static cv4l_fmt old_fmt = fmt;
-	unsigned coded_height = fmt.g_height();
+	unsigned coded_height;
 	unsigned real_width;
 	unsigned real_height;
 	unsigned char *plane_p = buf;
 	unsigned char *row_p;
-
-	/*
-	 * if the source change event was dequeued but the stream was not yet restarted
-	 * then the current buffers still fit the old resolution so we need to save it
-	 */
-	if (in_source_change_event) {
-		printf("source change\n");
-		vic_fmt = old_info;
-		fmt = old_fmt;
-		//exit(1);
-	}
-	else {
-		vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
-		old_info = vic_fmt;
-		old_fmt = fmt;
-	}
 
 	if (is_read) {
 		real_width  = cropped_width;
@@ -813,6 +797,25 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 		real_height = composed_height;
 	}
 
+	/*
+	 * if the source change event was dequeued but the stream was not yet restarted
+	 * then the current buffers still fit the old resolution so we need to save it
+	 */
+	if (in_source_change_event) {
+		printf("source change\n");
+		vic_fmt = old_info;
+		fmt = old_fmt;
+		printf("r %u %u c %u %u  \n", real_width, real_height, fmt.g_bytesperline(), coded_height);
+		printf("r old_info = %u, \n", old_info->id);
+		//exit(1);
+	}
+	else {
+		vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+		old_info = vic_fmt;
+		old_fmt = fmt;
+	}
+
+	coded_height = fmt.g_height();
 	sz = 0;
 	len = real_width * real_height * vic_fmt->sizeimage_mult / vic_fmt->sizeimage_div;
 
@@ -831,9 +834,7 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 			if (is_read)
 				wsz = fread(row_p, 1, consume_sz, fpointer);
 			else {
-				//printf("before\n");
 				wsz = fwrite(row_p, 1, consume_sz, fpointer);
-				//printf("after\n");
 			}
 			if (wsz == 0 && i == 0 && plane_idx == 0)
 				break;
@@ -984,11 +985,12 @@ restart:
 			read_write_padded_frame(fmt, (unsigned char *)buf, fin, sz, len, true);
 		else
 			sz = fread(buf, 1, len, fin);
-
+/*
 		if (first && sz != len) {
 			fprintf(stderr, "%s: Insufficient data, read %u needed %u\n", __func__, sz, len);
 			return false;
 		}
+*/
 		if (j == 0 && sz == 0 && stream_loop) {
 			fseek(fin, 0, SEEK_SET);
 			first = true;
@@ -1110,7 +1112,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			}
 		}
 		if (fin && !fill_buffer_from_file(fd, q, buf, fin))
-			return -2;
+			return 0;
 
 		if (qbuf) {
 			set_time_stamp(buf);
@@ -1934,6 +1936,7 @@ static int capture_setup(cv4l_fd &fd, cv4l_queue &in) {
 				(fmt_desc.pixelformat >>  8) & 0xff,
 				(fmt_desc.pixelformat >> 16) & 0xff,
 				(fmt_desc.pixelformat >> 24) & 0xff);
+//		cap_pixelformat = fmt_desc.pixelformat;
 		if (cap_pixelformat == fmt_desc.pixelformat)
 			break;
 	} while (!fd.enum_fmt(fmt_desc));
