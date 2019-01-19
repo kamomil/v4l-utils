@@ -205,6 +205,7 @@ enum Option {
 	OptListBuffersSdr,
 	OptListBuffersSdrOut,
 	OptListBuffersMeta,
+	OptStreamPixformat,
 	OptStreamCount,
 	OptStreamSkip,
 	OptStreamLoop,
@@ -299,6 +300,7 @@ __u32 parse_xfer_func(const char *s);
 __u32 parse_ycbcr(const char *s);
 __u32 parse_hsv(const char *s);
 __u32 parse_quantization(const char *s);
+int parse_pixelfmt(char *value,  __u32 &pixelformat);
 int parse_fmt(char *optarg, __u32 &width, __u32 &height, __u32 &pixelformat,
 	      __u32 &field, __u32 &colorspace, __u32 &xfer, __u32 &ycbcr,
 	      __u32 &quantization, __u32 &flags, __u32 *bytesperline);

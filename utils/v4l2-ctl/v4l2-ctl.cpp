@@ -238,6 +238,7 @@ static struct option long_options[] = {
 	{"list-buffers-sdr", no_argument, 0, OptListBuffersSdr},
 	{"list-buffers-sdr-out", no_argument, 0, OptListBuffersSdrOut},
 	{"list-buffers-meta", no_argument, 0, OptListBuffersMeta},
+	{"stream-pixformat", required_argument, 0, OptStreamPixformat},
 	{"stream-count", required_argument, 0, OptStreamCount},
 	{"stream-skip", required_argument, 0, OptStreamSkip},
 	{"stream-loop", no_argument, 0, OptStreamLoop},
@@ -722,6 +723,30 @@ __u32 parse_quantization(const char *s)
 	return V4L2_QUANTIZATION_DEFAULT;
 }
 
+int parse_pixelfmt(char *value,  __u32 &pixelformat)
+{
+	int fmts = 0;
+	bool be_pixfmt;
+
+	if(!value)
+		return -EINVAL;
+
+	be_pixfmt = strlen(value) == 7 && !memcmp(value + 4, "-BE", 3);
+	if (be_pixfmt)
+		value[4] = 0;
+	if (strlen(value) == 4) {
+		pixelformat =
+			v4l2_fourcc(value[0], value[1],
+					value[2], value[3]);
+		if (be_pixfmt)
+			pixelformat |= 1 << 31;
+	} else {
+		pixelformat = strtol(value, 0L, 0);
+	}
+	fmts |= FmtPixelFormat;
+	return 0;
+}
+
 int parse_fmt(char *optarg, __u32 &width, __u32 &height, __u32 &pixelformat,
 	      __u32 &field, __u32 &colorspace, __u32 &xfer_func, __u32 &ycbcr,
 	      __u32 &quantization, __u32 &flags, __u32 *bytesperline)
@@ -729,7 +754,6 @@ int parse_fmt(char *optarg, __u32 &width, __u32 &height, __u32 &pixelformat,
 	char *value, *subs;
 	int fmts = 0;
 	unsigned bpl_index = 0;
-	bool be_pixfmt;
 
 	field = V4L2_FIELD_ANY;
 	flags = 0;
@@ -760,18 +784,7 @@ int parse_fmt(char *optarg, __u32 &width, __u32 &height, __u32 &pixelformat,
 			fmts |= FmtHeight;
 			break;
 		case 2:
-			be_pixfmt = strlen(value) == 7 && !memcmp(value + 4, "-BE", 3);
-			if (be_pixfmt)
-				value[4] = 0;
-			if (strlen(value) == 4) {
-				pixelformat =
-					v4l2_fourcc(value[0], value[1],
-							value[2], value[3]);
-				if (be_pixfmt)
-					pixelformat |= 1 << 31;
-			} else {
-				pixelformat = strtol(value, 0L, 0);
-			}
+			parse_pixelfmt(value, pixelformat);
 			fmts |= FmtPixelFormat;
 			break;
 		case 3:

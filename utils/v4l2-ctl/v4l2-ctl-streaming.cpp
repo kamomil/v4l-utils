@@ -78,6 +78,7 @@ static unsigned int composed_width;
 static unsigned int composed_height;
 static bool support_cap_compose;
 static bool support_out_crop;
+static unsigned int cap_pixelformat;
 static bool in_source_change_event;
 
 #define TS_WINDOW 241
@@ -272,6 +273,10 @@ void streaming_usage(void)
 	       "  --stream-from <file>\n"
 	       "                     stream from this file. The default is to generate a pattern.\n"
 	       "                     If <file> is '-', then the data is read from stdin.\n"
+	       "  --stream-pixformat <pixformat>\n"
+	       "                     set the video pixelformat."
+	       "                     <pixelformat> is either the format index as reported by\n"
+	       "                     --list-formats-out, or the fourcc value as a string.\n"
 	       "  --stream-from-hdr <file> stream from this file. Same as --stream-from, but each\n"
 	       "                     frame is prefixed by a header. Use for compressed data.\n"
 	       "  --stream-from-host <hostname[:port]>\n"
@@ -606,8 +611,16 @@ void streaming_cmd(int ch, char *optarg)
 {
 	unsigned i;
 	int speed;
+	int r;
 
 	switch (ch) {
+	case OptStreamPixformat:
+		r = parse_pixelfmt(optarg, cap_pixelformat);
+		if (r) {
+			streaming_usage();
+			exit(1);
+		}
+		break;
 	case OptStreamCount:
 		stream_count = strtoul(optarg, 0L, 0);
 		break;
@@ -1853,6 +1866,9 @@ enum stream_type {
 
 static int capture_setup(cv4l_fd &fd, cv4l_queue &in)
 {
+	v4l2_fmtdesc fmt_desc;
+	cv4l_fmt fmt;
+
 	if (fd.streamoff(in.g_type())) {
 		fprintf(stderr, "%s: fd.streamoff error\n", __func__);
 		return -1;
@@ -1863,6 +1879,27 @@ static int capture_setup(cv4l_fd &fd, cv4l_queue &in)
 	if (in.reqbufs(&fd)) {
 		fprintf(stderr, "%s: in.reqbufs 0 error\n", __func__);
 		return -1;
+	}
+
+	if (cap_pixelformat) {
+		if (fd.enum_fmt(fmt_desc, true, 0, in.g_type())) {
+			fprintf(stderr, "%s: fd.enum_fmt error\n", __func__);
+			return -1;
+		}
+
+		do {
+			if (cap_pixelformat == fmt_desc.pixelformat)
+				break;
+		} while (!fd.enum_fmt(fmt_desc));
+
+		if (cap_pixelformat != fmt_desc.pixelformat) {
+			fprintf(stderr, "%s: format from user not supported\n", __func__);
+			return -1;
+		}
+
+		fd.g_fmt(fmt, in.g_type());
+		fmt.s_pixelformat(cap_pixelformat);
+		fd.s_fmt(fmt, in.g_type());
 	}
 
 	if (in.reqbufs(&fd, reqbufs_count_cap)) {
