@@ -1259,6 +1259,7 @@ int main(int argc, char **argv)
 		options[OptGetSlicedVbiOutFormat] = 1;
 		options[OptGetSdrFormat] = 1;
 		options[OptGetSdrOutFormat] = 1;
+		options[OptGetMetaFormat] = 1;
 		options[OptGetFBuf] = 1;
 		options[OptGetCropCap] = 1;
 		options[OptGetOutputCropCap] = 1;
@@ -1268,7 +1269,7 @@ int main(int argc, char **argv)
 		options[OptGetPriority] = 1;
 		options[OptGetSelection] = 1;
 		options[OptGetOutputSelection] = 1;
-		options[OptListCtrls] = 1;
+		options[OptListCtrlsMenus] = 1;
 		options[OptSilent] = 1;
 	}
 

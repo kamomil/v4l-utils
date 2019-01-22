@@ -346,7 +346,7 @@ void streaming_usage(void)
 	       	V4L_STREAM_PORT);
 }
 
-static int get_codec_type(cv4l_fd &fd, enum codec_type &codec_type)
+static enum codec_type get_codec_type(cv4l_fd &fd)
 {
 	struct v4l2_fmtdesc fmt_desc;
 	int num_cap_fmts = 0;
@@ -354,45 +354,43 @@ static int get_codec_type(cv4l_fd &fd, enum codec_type &codec_type)
 	int num_out_fmts = 0;
 	int num_compressed_out_fmts = 0;
 
-	codec_type = NOT_CODEC;
 	if (!fd.has_vid_m2m())
-		return 0;
+		return NOT_CODEC;
 
 	if (fd.enum_fmt(fmt_desc, true, 0, V4L2_BUF_TYPE_VIDEO_CAPTURE))
-		return -1;
+		return NOT_CODEC;
 
 	do {
-		if(fmt_desc.flags & V4L2_FMT_FLAG_COMPRESSED)
+		if (fmt_desc.flags & V4L2_FMT_FLAG_COMPRESSED)
 			num_compressed_cap_fmts++;
 		num_cap_fmts++;
 	} while (!fd.enum_fmt(fmt_desc));
 
 
 	if (fd.enum_fmt(fmt_desc, true, 0, V4L2_BUF_TYPE_VIDEO_OUTPUT))
-		return -1;
+		return NOT_CODEC;
 
 	do {
-		if(fmt_desc.flags & V4L2_FMT_FLAG_COMPRESSED)
+		if (fmt_desc.flags & V4L2_FMT_FLAG_COMPRESSED)
 			num_compressed_out_fmts++;
 		num_out_fmts++;
 	} while (!fd.enum_fmt(fmt_desc));
 
-	if(num_compressed_out_fmts == 0 && num_compressed_cap_fmts == num_cap_fmts) {
-		codec_type = ENCODER;
-		return 0;
+	if (num_compressed_out_fmts == 0 && num_compressed_cap_fmts == num_cap_fmts) {
+		return ENCODER;
 	}
 
-	if(num_compressed_cap_fmts == 0 && num_compressed_out_fmts == num_out_fmts) {
-		codec_type = DECODER;
-		return 0;
+	if (num_compressed_cap_fmts == 0 && num_compressed_out_fmts == num_out_fmts) {
+		return DECODER;
 	}
 
-	return 0;
+	return NOT_CODEC;
 }
 
 static int get_cap_compose_rect(cv4l_fd &fd)
 {
 	v4l2_selection sel;
+
 	memset(&sel, 0, sizeof(sel));
 	sel.type = vidcap_buftype;
 	sel.target = V4L2_SEL_TGT_COMPOSE;
@@ -768,11 +766,9 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 				    FILE *fpointer, unsigned &sz,
 				    unsigned &len, bool is_read)
 {
-	const struct v4l2_fwht_pixfmt_info *vic_fmt;
-	const static struct v4l2_fwht_pixfmt_info *old_info =
-		v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
-	static cv4l_fmt old_fmt = fmt;
-	unsigned coded_height;
+	const struct v4l2_fwht_pixfmt_info *vic_fmt =
+			v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
+	unsigned coded_height = fmt.g_height();
 	unsigned real_width;
 	unsigned real_height;
 	unsigned char *plane_p = buf;
@@ -786,21 +782,6 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 		real_height = composed_height;
 	}
 
-	/*
-	 * if the source change event was dequeued but the stream was not yet restarted
-	 * then the current buffers still fit the old resolution so we need to save it
-	 */
-	if (in_source_change_event) {
-		vic_fmt = old_info;
-		fmt = old_fmt;
-	}
-	else {
-		vic_fmt = v4l2_fwht_find_pixfmt(fmt.g_pixelformat());
-		old_info = vic_fmt;
-		old_fmt = fmt;
-	}
-
-	coded_height = fmt.g_height();
 	sz = 0;
 	len = real_width * real_height * vic_fmt->sizeimage_mult / vic_fmt->sizeimage_div;
 
@@ -835,7 +816,8 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 	}
 }
 
-static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b, FILE *fin)
+static bool fill_buffer_from_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &b,
+				  cv4l_fmt &fmt, FILE *fin)
 {
 	static bool first = true;
 	static bool is_fwht = false;
@@ -934,7 +916,7 @@ restart:
 
 		if (!fread(&v, sizeof(v), 1, fin)) {
 			if (first) {
-				fprintf(stderr, "%s: Insufficient data\n", __func__);
+				fprintf(stderr, "Insufficient data\n");
 				return false;
 			}
 			if (stream_loop) {
@@ -970,12 +952,11 @@ restart:
 			read_write_padded_frame(fmt, (unsigned char *)buf, fin, sz, len, true);
 		else
 			sz = fread(buf, 1, len, fin);
-/*
+
 		if (first && sz != len) {
-			fprintf(stderr, "%s: Insufficient data, read %u needed %u\n", __func__, sz, len);
+			fprintf(stderr, "Insufficient data\n");
 			return false;
 		}
-*/
 		if (j == 0 && sz == 0 && stream_loop) {
 			fseek(fin, 0, SEEK_SET);
 			first = true;
@@ -984,10 +965,8 @@ restart:
 		b.s_bytesused(sz, j);
 		if (sz == len)
 			continue;
-		if (sz == 0) {
-			fprintf(stderr, "%s: read no bytes from file\n", __func__);
+		if (sz == 0)
 			return false;
-		}
 		if (sz)
 			fprintf(stderr, "%u != %u\n", sz, len);
 		continue;
@@ -1096,8 +1075,8 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 					tpg_fillbuffer(&tpg, stream_out_std, j, (u8 *)q.g_dataptr(i, j));
 			}
 		}
-		if (fin && !fill_buffer_from_file(fd, q, buf, fin))
-			return 0;
+		if (fin && !fill_buffer_from_file(fd, q, buf, fmt, fin))
+			return -2;
 
 		if (qbuf) {
 			set_time_stamp(buf);
@@ -1114,7 +1093,8 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 	return 0;
 }
 
-static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf, FILE *fout)
+static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf,
+				 cv4l_fmt &fmt, FILE *fout)
 {
 #ifndef NO_STREAM_TO
 	unsigned comp_size[VIDEO_MAX_PLANES];
@@ -1155,9 +1135,7 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf, F
 		__u32 used = buf.g_bytesused();
 		unsigned offset = buf.g_data_offset();
 		unsigned sz;
-		cv4l_fmt fmt;
 
-		fd.g_fmt(fmt, q.g_type());
 		if (offset > used) {
 			// Should never happen
 			fprintf(stderr, "offset %d > used %d!\n",
@@ -1190,7 +1168,7 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf, F
 }
 
 static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
-			 unsigned &count, fps_timestamps &fps_ts)
+			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt &fmt)
 {
 	char ch = '<';
 	int ret;
@@ -1229,7 +1207,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 
 	if (fout && (!stream_skip || ignore_count_skip) &&
 	    buf.g_bytesused(0) && !(buf.g_flags() & V4L2_BUF_FLAG_ERROR))
-		write_buffer_to_file(fd, q, buf, fout);
+		write_buffer_to_file(fd, q, buf, fmt, fout);
 
 	if (buf.g_flags() & V4L2_BUF_FLAG_KEYFRAME)
 		ch = 'K';
@@ -1286,16 +1264,14 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 		sleep(1);
 	if (stream_count == 0)
 		return 0;
-	if (--stream_count == 0) {
-		printf("%s: stream_count reached\n", __func__);
+	if (--stream_count == 0)
 		return -1;
-	}
 
 	return 0;
 }
 
 static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap,
-			 unsigned &count, fps_timestamps &fps_ts)
+			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt fmt)
 {
 	cv4l_buffer buf(q);
 	int ret = 0;
@@ -1340,10 +1316,8 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 			output_field = V4L2_FIELD_TOP;
 	}
 
-	if (fin && !fill_buffer_from_file(fd, q, buf, fin)) {
-		printf("%s: fill_buffer_from_file failed\n", __func__);
+	if (fin && !fill_buffer_from_file(fd, q, buf, fmt, fin))
 		return -2;
-	}
 
 	if (!fin && stream_out_refresh) {
 		for (unsigned j = 0; j < buf.g_num_planes(); j++)
@@ -1376,9 +1350,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 		sleep(1);
 	if (stream_count == 0)
 		return 0;
-	if (--stream_count == 0) {
-		printf("%s: count is 0\n", __func__);
-	}
+	if (--stream_count == 0)
 		return -2;
 
 	return 0;
@@ -1418,6 +1390,9 @@ static void streaming_set_cap(cv4l_fd &fd)
 	bool eos;
 	bool source_change;
 	FILE *fout = NULL;
+	cv4l_fmt fmt;
+
+	fd.g_fmt(fmt);
 
 	if (!(capabilities & (V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE |
 			      V4L2_CAP_VBI_CAPTURE | V4L2_CAP_SLICED_VBI_CAPTURE |
@@ -1626,7 +1601,7 @@ recover:
 
 		if (FD_ISSET(fd.g_fd(), &read_fds)) {
 			r = do_handle_cap(fd, q, fout, NULL,
-					   count, fps_ts);
+					   count, fps_ts, fmt);
 			if (r == -1)
 				break;
 		}
@@ -1658,6 +1633,9 @@ static void streaming_set_out(cv4l_fd &fd)
 	fps_timestamps fps_ts;
 	unsigned count = 0;
 	FILE *fin = NULL;
+	cv4l_fmt fmt;
+
+	fd.g_fmt(fmt);
 
 	if (!(capabilities & (V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_VIDEO_OUTPUT_MPLANE |
 			      V4L2_CAP_VBI_OUTPUT | V4L2_CAP_SLICED_VBI_OUTPUT |
@@ -1859,7 +1837,7 @@ static void streaming_set_out(cv4l_fd &fd)
 			}
 		}
 		r = do_handle_out(fd, q, fin, NULL,
-				   count, fps_ts);
+				   count, fps_ts, fmt);
 		if (r == -1)
 			break;
 
@@ -1886,8 +1864,9 @@ enum stream_type {
 	OUT,
 };
 
-static int capture_setup(cv4l_fd &fd, cv4l_queue &in) {
-	struct v4l2_fmtdesc fmt_desc;
+static int capture_setup(cv4l_fd &fd, cv4l_queue &in)
+{
+	v4l2_fmtdesc fmt_desc;
 	cv4l_fmt fmt;
 
 	if (fd.streamoff(in.g_type())) {
@@ -1895,8 +1874,6 @@ static int capture_setup(cv4l_fd &fd, cv4l_queue &in) {
 		return -1;
 	}
 	get_cap_compose_rect(fd);
-	printf("streamed off\n");
-	//getchar();
 
 	/* release any buffer allocated */
 	if (in.reqbufs(&fd)) {
@@ -1904,41 +1881,30 @@ static int capture_setup(cv4l_fd &fd, cv4l_queue &in) {
 		return -1;
 	}
 
-	if (fd.enum_fmt(fmt_desc, true, 0, in.g_type())) {
-		fprintf(stderr, "%s: fd.enum_fmt error\n", __func__);
-		return -1;
+	if (cap_pixelformat) {
+		if (fd.enum_fmt(fmt_desc, true, 0, in.g_type())) {
+			fprintf(stderr, "%s: fd.enum_fmt error\n", __func__);
+			return -1;
+		}
+
+		do {
+			if (cap_pixelformat == fmt_desc.pixelformat)
+				break;
+		} while (!fd.enum_fmt(fmt_desc));
+
+		if (cap_pixelformat != fmt_desc.pixelformat) {
+			fprintf(stderr, "%s: format from user not supported\n", __func__);
+			return -1;
+		}
+
+		fd.g_fmt(fmt, in.g_type());
+		fmt.s_pixelformat(cap_pixelformat);
+		fd.s_fmt(fmt, in.g_type());
 	}
-
-	do {
-		printf("user fmt: %c%c%c%c\n", cap_pixelformat & 0xff,
-				(cap_pixelformat >>  8) & 0xff,
-				(cap_pixelformat >> 16) & 0xff,
-				(cap_pixelformat >> 24) & 0xff);
-		printf("allowed fmt: %c%c%c%c\n", fmt_desc.pixelformat & 0xff,
-				(fmt_desc.pixelformat >>  8) & 0xff,
-				(fmt_desc.pixelformat >> 16) & 0xff,
-				(fmt_desc.pixelformat >> 24) & 0xff);
-//		cap_pixelformat = fmt_desc.pixelformat;
-		if (cap_pixelformat == fmt_desc.pixelformat)
-			break;
-	} while (!fd.enum_fmt(fmt_desc));
-
-	if (cap_pixelformat != fmt_desc.pixelformat) {
-		fprintf(stderr, "%s: format from user not supported\n", __func__);
-		return -1;
-	}
-
-	fd.g_fmt(fmt, in.g_type());
-	fmt.s_pixelformat(cap_pixelformat);
-	printf("%s: before set format\n", __func__);
-	//getchar();
-	fd.s_fmt(fmt, in.g_type());
-	printf("%s: after set format\n", __func__);
-	//getchar();
 
 	if (in.reqbufs(&fd, reqbufs_count_cap)) {
 		fprintf(stderr, "%s: in.reqbufs %u error\n", __func__,
-				reqbufs_count_cap);
+			reqbufs_count_cap);
 		return -1;
 	}
 	if (in.obtain_bufs(&fd) || in.queue_all(&fd)) {
@@ -1965,6 +1931,10 @@ static void streaming_set_m2m(cv4l_fd &fd)
 	fd_set *ex_fds = &fds[1]; /* for capture */
 	fd_set *wr_fds = &fds[2]; /* for output */
 	bool cap_streaming = false;
+	cv4l_fmt fmt[2];
+
+	fd.g_fmt(fmt[OUT], out.g_type());
+	fd.g_fmt(fmt[CAP], in.g_type());
 
 	if (!fd.has_vid_m2m()) {
 		fprintf(stderr, "unsupported m2m stream type\n");
@@ -1987,6 +1957,10 @@ static void streaming_set_m2m(cv4l_fd &fd)
 
 	bool have_eos = !fd.subscribe_event(sub);
 	bool is_encoder = false;
+	enum codec_type codec_type = get_codec_type(fd);
+
+	if (codec_type == NOT_CODEC)
+		goto done;
 
 	if (have_eos) {
 		cv4l_fmt fmt(in.g_type());
@@ -1997,7 +1971,7 @@ static void streaming_set_m2m(cv4l_fd &fd)
 
 	memset(&sub, 0, sizeof(sub));
 	sub.type = V4L2_EVENT_SOURCE_CHANGE;
-	if(fd.subscribe_event(sub))
+	if (fd.subscribe_event(sub))
 		goto done;
 
 	if (file_to) {
@@ -2021,29 +1995,20 @@ static void streaming_set_m2m(cv4l_fd &fd)
 			return;
 		}
 	}
-	enum codec_type codec_type;
 
-	if (get_codec_type(fd, codec_type)) {
-		fprintf(stderr, "%s: get_codec_type error\n", __func__);
-		goto done;
-	}
-
-	printf("codec is %s\n", codec_type == ENCODER ? "ENC" : codec_type == DECODER ? "DEC" : "NON");
 	if (out.reqbufs(&fd, reqbufs_count_out))
-		goto done;
-	if (fd.streamon(out.g_type()))
 		goto done;
 
 	if (do_setup_out_buffers(fd, out, file[OUT], true))
 		goto done;
 
-	if(codec_type != DECODER) {
-		if (in.reqbufs(&fd, reqbufs_count_cap) ||
-		    in.obtain_bufs(&fd) ||
-	    	    in.queue_all(&fd) ||
-	    	    fd.streamon(in.g_type()))
+	if (fd.streamon(out.g_type()))
+		goto done;
+
+	if (codec_type == ENCODER)
+		if (capture_setup(fd, in))
 			goto done;
-	}
+
 	fps_ts[CAP].determine_field(fd.g_fd(), in.g_type());
 	fps_ts[OUT].determine_field(fd.g_fd(), out.g_type());
 
@@ -2070,10 +2035,9 @@ static void streaming_set_m2m(cv4l_fd &fd)
 			FD_ZERO(wr_fds);
 			FD_SET(fd.g_fd(), wr_fds);
 		}
-		//getchar();
+
 		r = select(fd.g_fd() + 1, rd_fds, wr_fds, ex_fds, &tv);
 
-		//printf("select returned %d\n", r);
 		if (r == -1) {
 			if (EINTR == errno)
 				continue;
@@ -2086,64 +2050,13 @@ static void streaming_set_m2m(cv4l_fd &fd)
 			goto done;
 		}
 
-		if (ex_fds && FD_ISSET(fd.g_fd(), ex_fds)) {
-			struct v4l2_event ev;
-
-			while (!fd.dqevent(ev)) {
-				if (ev.type == V4L2_EVENT_EOS) {
-					fprintf(stderr, "EOS");
-					fflush(stderr);
-				} else if(ev.type == V4L2_EVENT_SOURCE_CHANGE) {
-					fprintf(stderr, "SOURCE CHANGE\n");
-
-					/* 
-					 * if capture is already streaming, wait to the a capture
-					 * buffer with the LAST_BUFFER flag
-					 */
-					if (cap_streaming) {
-						printf("cap streaming - wait to last buffer\n");
-						in_source_change_event = true;
-						continue;
-					}
-					printf("cap not streaming - call capture_setup\n");
-					if (capture_setup(fd, in))
-						goto done;
-				}
-			}
-		}
 		if (rd_fds && FD_ISSET(fd.g_fd(), rd_fds)) {
 			r = do_handle_cap(fd, in, file[CAP], NULL,
-					  count[CAP], fps_ts[CAP]);
+					  count[CAP], fps_ts[CAP], fmt[CAP]);
 			if (r < 0) {
 				rd_fds = NULL;
-				printf("%s: do_handle_cap returned %d\n", __func__, r);
 				if (!have_eos) {
 					ex_fds = NULL;
-					break;
-				}
-			}
-			if (last_buffer) {
-				printf("after do_handle_cap - last-buffer\n");
-				if (in_source_change_event) {
-					printf("calling cature_setup\n");
-					in_source_change_event = false;
-					last_buffer = false;
-					if (file_to && strcmp(file_to, "-")) {
-						static int idx = 1;
-						static char next_file_to[256];
-						snprintf(next_file_to, 256, "%s.%d", file_to, idx++);
-						fclose(file[CAP]);
-						file[CAP] = fopen(next_file_to, "w+");
-						if (!file[CAP]) {
-							fprintf(stderr, "could not open %s for writing\n", next_file_to);
-							return;
-						}
-
-					}
-					if (capture_setup(fd, in))
-						goto done;
-					cap_streaming = true;
-				} else {
 					break;
 				}
 			}
@@ -2151,7 +2064,7 @@ static void streaming_set_m2m(cv4l_fd &fd)
 
 		if (wr_fds && FD_ISSET(fd.g_fd(), wr_fds)) {
 			r = do_handle_out(fd, out, file[OUT], NULL,
-					  count[OUT], fps_ts[OUT]);
+					  count[OUT], fps_ts[OUT], fmt[OUT]);
 			if (r < 0)  {
 				wr_fds = NULL;
 
@@ -2170,6 +2083,43 @@ static void streaming_set_m2m(cv4l_fd &fd)
 				} else {
 					break;
 				}
+			}
+		}
+
+		if (ex_fds && FD_ISSET(fd.g_fd(), ex_fds)) {
+			struct v4l2_event ev;
+
+			while (!fd.dqevent(ev)) {
+				if (ev.type == V4L2_EVENT_EOS) {
+					wr_fds = NULL;
+					fprintf(stderr, "EOS");
+					fflush(stderr);
+				} else if (ev.type == V4L2_EVENT_SOURCE_CHANGE) {
+					fprintf(stderr, "SOURCE CHANGE\n");
+					in_source_change_event = true;
+
+					/*
+					 * if capture is not streaming, the
+					 * driver will not send a last buffer so
+					 * we set it here
+					 */
+					if (!cap_streaming)
+						last_buffer = true;
+				}
+			}
+		}
+
+		if (last_buffer) {
+			if (in_source_change_event) {
+				in_source_change_event = false;
+				last_buffer = false;
+				if (capture_setup(fd, in))
+					goto done;
+				fd.g_fmt(fmt[OUT], out.g_type());
+				fd.g_fmt(fmt[CAP], in.g_type());
+				cap_streaming = true;
+			} else {
+				break;
 			}
 		}
 	}
@@ -2205,7 +2155,10 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 	FILE *file[2] = {NULL, NULL};
 	fd_set fds;
 	unsigned cnt = 0;
+	cv4l_fmt fmt[2];
 
+	fd.g_fmt(fmt[OUT], out.g_type());
+	fd.g_fmt(fmt[CAP], in.g_type());
 	if (!(capabilities & (V4L2_CAP_VIDEO_CAPTURE |
 			      V4L2_CAP_VIDEO_CAPTURE_MPLANE |
 			      V4L2_CAP_VIDEO_M2M |
@@ -2321,7 +2274,7 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 			int index = -1;
 
 			r = do_handle_cap(fd, in, file[CAP], &index,
-					   count[CAP], fps_ts[CAP]);
+					  count[CAP], fps_ts[CAP], fmt[CAP]);
 			if (r)
 				fprintf(stderr, "handle cap %d\n", r);
 			if (!r) {
@@ -2330,7 +2283,7 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 				if (fd.querybuf(buf))
 					break;
 				r = do_handle_out(out_fd, out, file[OUT], &buf,
-					   count[OUT], fps_ts[OUT]);
+						  count[OUT], fps_ts[OUT], fmt[OUT]);
 			}
 			if (r)
 				fprintf(stderr, "handle out %d\n", r);
