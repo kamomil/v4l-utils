@@ -745,6 +745,7 @@ public:
 	unsigned g_capabilities() const { return v4l_queue_g_capabilities(this); }
 	unsigned g_length(unsigned plane) const { return v4l_queue_g_length(this, plane); }
 	unsigned g_mem_offset(unsigned index, unsigned plane) const { return v4l_queue_g_mem_offset(this, index, plane); }
+	unsigned g_req_fd(unsigned index) const { return v4l_queue_g_req_fd(this, index); }
 	void *g_mmapping(unsigned index, unsigned plane) const { return v4l_queue_g_mmapping(this, index, plane); }
 	void s_mmapping(unsigned index, unsigned plane, void *m) { v4l_queue_s_mmapping(this, index, plane, m); }
 	void *g_userptr(unsigned index, unsigned plane) const { return v4l_queue_g_userptr(this, index, plane); }
@@ -796,6 +797,10 @@ public:
 	int export_bufs(cv4l_fd *fd, unsigned exp_type)
 	{
 		return v4l_queue_export_bufs(fd->g_v4l_fd(), this, exp_type);
+	}
+	int alloc_req(int media_fd, unsigned index)
+	{
+		return v4l_queue_alloc_req(this, media_fd, index);
 	}
 	void close_exported_fds()
 	{
