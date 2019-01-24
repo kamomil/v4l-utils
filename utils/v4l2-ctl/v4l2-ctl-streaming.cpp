@@ -1995,6 +1995,25 @@ static void streaming_set_m2m(cv4l_fd &fd)
 			return;
 		}
 	}
+	/*
+	struct v4l2_ext_controls {
+		union {
+			__u32 ctrl_class;
+			__u32 which;
+		};
+		__u32 count;
+		__u32 error_idx;
+		__s32 request_fd;
+		__u32 reserved[1];
+		struct v4l2_ext_control *controls;
+	};
+	*/
+
+	getchar();
+	v4l2_ext_controls ec;
+	fd.g_ext_ctrls(ec);
+	fd.s_ext_ctrls(ec);
+	getchar();
 
 	if (out.reqbufs(&fd, reqbufs_count_out))
 		goto done;
