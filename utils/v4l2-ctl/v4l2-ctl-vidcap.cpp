@@ -19,8 +19,9 @@
 static struct v4l2_frmsizeenum frmsize; /* list frame sizes */
 static struct v4l2_frmivalenum frmival; /* list frame intervals */
 static unsigned set_fmts;
-static __u32 width, height, pixfmt, field, flags;
-static __u32 bytesperline[VIDEO_MAX_PLANES];
+static __u32 field, flags;
+__u32 vidcap_width, vidcap_height, vidcap_pixfmt;
+__u32 bytesperline[VIDEO_MAX_PLANES];
 
 void vidcap_usage(void)
 {
@@ -104,7 +105,7 @@ void vidcap_cmd(int ch, char *optarg)
 	switch (ch) {
 	case OptSetVideoFormat:
 	case OptTryVideoFormat:
-		set_fmts = parse_fmt(optarg, width, height, pixfmt, field, colorspace,
+		set_fmts = parse_fmt(optarg, vidcap_width, vidcap_height, vidcap_pixfmt, field, colorspace,
 				xfer_func, ycbcr, quantization, flags, bytesperline);
 		if (!set_fmts ||
 		    (set_fmts & (FmtColorspace | FmtYCbCr | FmtQuantization | FmtXferFunc))) {
@@ -168,11 +169,11 @@ void vidcap_set(cv4l_fd &_fd)
 		if (doioctl(fd, VIDIOC_G_FMT, &vfmt) == 0) {
 			if (is_multiplanar) {
 				if (set_fmts & FmtWidth)
-					vfmt.fmt.pix_mp.width = width;
+					vfmt.fmt.pix_mp.width = vidcap_width;
 				if (set_fmts & FmtHeight)
-					vfmt.fmt.pix_mp.height = height;
+					vfmt.fmt.pix_mp.height = vidcap_height;
 				if (set_fmts & FmtPixelFormat) {
-					vfmt.fmt.pix_mp.pixelformat = pixfmt;
+					vfmt.fmt.pix_mp.pixelformat = vidcap_pixfmt;
 					if (vfmt.fmt.pix_mp.pixelformat < 256) {
 						vfmt.fmt.pix_mp.pixelformat =
 							find_pixel_format(fd, vfmt.fmt.pix_mp.pixelformat,
@@ -196,11 +197,11 @@ void vidcap_set(cv4l_fd &_fd)
 				}
 			} else {
 				if (set_fmts & FmtWidth)
-					vfmt.fmt.pix.width = width;
+					vfmt.fmt.pix.width = vidcap_width;
 				if (set_fmts & FmtHeight)
-					vfmt.fmt.pix.height = height;
+					vfmt.fmt.pix.height = vidcap_height;
 				if (set_fmts & FmtPixelFormat) {
-					vfmt.fmt.pix.pixelformat = pixfmt;
+					vfmt.fmt.pix.pixelformat = vidcap_pixfmt;
 					if (vfmt.fmt.pix.pixelformat < 256) {
 						vfmt.fmt.pix.pixelformat =
 							find_pixel_format(fd, vfmt.fmt.pix.pixelformat,

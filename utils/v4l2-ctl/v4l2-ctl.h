@@ -268,7 +268,7 @@ extern bool is_multiplanar;
 extern __u32 vidcap_buftype;
 extern __u32 vidout_buftype;
 extern int verbose;
-
+extern __u32 vidcap_width, vidcap_height, vidcap_pixfmt;
 typedef struct {
 	unsigned flag;
 	const char *str;
