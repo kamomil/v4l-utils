@@ -745,6 +745,7 @@ public:
 	unsigned g_capabilities() const { return v4l_queue_g_capabilities(this); }
 	unsigned g_length(unsigned plane) const { return v4l_queue_g_length(this, plane); }
 	unsigned g_mem_offset(unsigned index, unsigned plane) const { return v4l_queue_g_mem_offset(this, index, plane); }
+	unsigned g_req_fd(unsigned index) const { return v4l_queue_g_req_fd(this, index); }
 	void *g_mmapping(unsigned index, unsigned plane) const { return v4l_queue_g_mmapping(this, index, plane); }
 	void s_mmapping(unsigned index, unsigned plane, void *m) { v4l_queue_s_mmapping(this, index, plane, m); }
 	void *g_userptr(unsigned index, unsigned plane) const { return v4l_queue_g_userptr(this, index, plane); }
@@ -797,6 +798,10 @@ public:
 	{
 		return v4l_queue_export_bufs(fd->g_v4l_fd(), this, exp_type);
 	}
+	int alloc_req(int media_fd, unsigned index)
+	{
+		return v4l_queue_alloc_req(this, media_fd, index);
+	}
 	void close_exported_fds()
 	{
 		v4l_queue_close_exported_fds(this);
@@ -842,6 +847,7 @@ public:
 	}
 	void init(const cv4l_buffer &b)
 	{
+		printf("buf copy ctor copying %lu\n", sizeof(b));
 		memcpy((v4l2_buffer *)this, (v4l2_buffer *)&b, sizeof(b));
 		if (v4l_type_is_planar(g_type()))
 			buf.m.planes = planes;
