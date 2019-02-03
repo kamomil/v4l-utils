@@ -775,17 +775,18 @@ static void read_fwht_frame(cv4l_fmt &fmt, unsigned char *buf,
 		FILE *fpointer, unsigned &sz,
 		unsigned &len)
 {
-	sz = fread(buf, sizeof(struct fwht_cframe_hdr), 1, fpointer);
+	len = sizeof(struct fwht_cframe_hdr);
+	sz = fread(buf, 1, sizeof(struct fwht_cframe_hdr), fpointer);
 	if (sz < sizeof(struct fwht_cframe_hdr))
 		return;
 
 	struct fwht_cframe_hdr *h = (struct fwht_cframe_hdr*) buf;
-	len = sizeof(struct fwht_cframe_hdr) + ntohl(h->size);
+	len += ntohl(h->size);
 
 	sz += fread(buf + sz, 1, ntohl(h->size), fpointer);
 }
 
-static bool set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
+static int set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
 			      __u64 last_bf_ts, int req_fd)
 {
 	v4l2_ext_controls controls;
@@ -808,10 +809,7 @@ static bool set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
 	controls.request_fd = req_fd;
 	controls.controls = &control;
 	controls.count = 1;
-	if (!fd.s_ext_ctrls(controls))
-		return false;
-
-	return true;
+	return fd.s_ext_ctrls(controls);
 }
 
 
@@ -969,7 +967,7 @@ restart:
 
 		if (!fread(&v, sizeof(v), 1, fin)) {
 			if (first) {
-				fprintf(stderr, "Insufficient data\n");
+				fprintf(stderr, "%s: Insufficient data\n", __func__);
 				return false;
 			}
 			if (stream_loop) {
@@ -1008,7 +1006,7 @@ restart:
 			sz = fread(buf, 1, len, fin);
 
 		if (first && sz != len) {
-			fprintf(stderr, "Insufficient data\n");
+			fprintf(stderr, "%s: Insufficient data, excpected %u, read %u\n", __func__, len, sz);
 			return false;
 		}
 		if (j == 0 && sz == 0 && stream_loop) {
@@ -1148,8 +1146,10 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			for (unsigned j = 0; j < q.g_num_planes(); j++) {
 				struct fwht_cframe_hdr *hdr =
 					(struct fwht_cframe_hdr*)q.g_dataptr(buf.g_index(), j);
-				if(!set_fwht_ext_ctrl(fd, hdr, last_fwht_bf_ts, buf.g_request_fd())) {
-					fprintf(stderr, "%s: set_fwht_ext_ctrls failed on %dth buffer\n", __func__, i);
+				int ret = set_fwht_ext_ctrl(fd, hdr, last_fwht_bf_ts, buf.g_request_fd());
+				if (ret) {
+					fprintf(stderr, "%s: set_fwht_ext_ctrls failed on %dth buf\n", __func__, i);
+					fprintf(stderr, "%s: with error %s\n", __func__, strerror(errno));
 					return -1;
 				}
 			}
@@ -1165,6 +1165,8 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			fflush(stderr);
 		}
 		if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
+			printf("%s: about to queue request %d, fd is %d\n", __func__, i, q.g_req_fd(i));
+			getchar();
 			int rc = ioctl(q.g_req_fd(i), MEDIA_REQUEST_IOC_QUEUE);
 			if (rc < 0) {
 				fprintf(stderr, "Unable to queue media request: %s\n",
@@ -1359,10 +1361,10 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 }
 
 static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap,
-			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt fmt,
-			 cv4l_buffer &buf, bool qbuf)
+			 unsigned &count, fps_timestamps &fps_ts,
+			 cv4l_fmt fmt, bool qbuf)
 {
-	buf.init(q);
+	cv4l_buffer buf(q);
 	int ret = 0;
 
 	if (cap) {
@@ -1416,11 +1418,17 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 	if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
 
 		printf("%s: req_fd flag: %s, req fd = %d\n", __func__,
-		       buf.g_flags() & V4L2_BUF_FLAG_REQUEST_FD ? "NOT ok" : "Ok",
+		       buf.g_flags() & V4L2_BUF_FLAG_REQUEST_FD ? "ok" : "NOT Ok",
 		       buf.g_request_fd());
+		if (ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_REINIT, NULL) < 0) {
+			fprintf(stderr, "Unable to reinit media request: %s\n",
+					strerror(errno));
+			return -1;
+		}
 		for (unsigned j = 0; j < q.g_num_planes(); j++) {
 			struct fwht_cframe_hdr* hdr = (struct fwht_cframe_hdr*)q.g_dataptr(buf.g_index(), j);
-			if (!set_fwht_ext_ctrl(fd, hdr, last_fwht_bf_ts, buf.g_request_fd())) {
+			int ret = set_fwht_ext_ctrl(fd, hdr, last_fwht_bf_ts, buf.g_request_fd());
+			if (ret) {
 				fprintf(stderr, "%s: set_fwht_ext_ctrls failed\n",
 					__func__);
 				return -1;
@@ -1435,6 +1443,17 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 		fprintf(stderr, "%s: failed: %s\n", "VIDIOC_QBUF", strerror(errno));
 		return -1;
 	}
+	if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
+		printf("%s: about to queue request, fd is %d\n", __func__, buf.g_request_fd());
+		getchar();
+		int rc = ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_QUEUE);
+		if (rc < 0) {
+			fprintf(stderr, "Unable to queue media request: %s\n",
+					strerror(errno));
+			return rc;
+		}
+	}
+
 	tpg_update_mv_count(&tpg, V4L2_FIELD_HAS_T_OR_B(output_field));
 
 	if (!verbose)
@@ -1948,7 +1967,6 @@ static void streaming_set_out(cv4l_fd &fd, cv4l_fd &exp_fd)
 
 	for (;;) {
 		int r;
-		cv4l_buffer buf;
 
 		if (use_poll) {
 			fd_set fds;
@@ -1977,7 +1995,7 @@ static void streaming_set_out(cv4l_fd &fd, cv4l_fd &exp_fd)
 			}
 		}
 		r = do_handle_out(fd, q, fin, NULL,
-				   count, fps_ts, fmt, buf, true);
+				   count, fps_ts, fmt, true);
 		if (r == -1)
 			break;
 
@@ -2155,10 +2173,9 @@ static void statefull_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		}
 
 		if (wr_fds && FD_ISSET(fd.g_fd(), wr_fds)) {
-			cv4l_buffer buf;
 			r = do_handle_out(fd, out, fout, NULL,
-					  count[OUT], fps_ts[OUT], fmt[OUT],
-					  buf, true);
+					  count[OUT], fps_ts[OUT],
+					  fmt[OUT], true);
 			if (r < 0)  {
 				wr_fds = NULL;
 
@@ -2269,8 +2286,8 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 
 	printf("%s: start\n", __func__);
 	struct fwht_cframe_hdr hdr;
-	if (!probe_fwht_header(&hdr, fin)) {
-		fprintf(stderr, "%s probe_fwht_header failed\n", __func__);
+	if (!probe_fwht_header(&hdr, fout)) {
+		fprintf(stderr, "%s probe_fwht_header failed: %s\n", __func__, strerror(errno));
 		return;
 	}
 
@@ -2310,11 +2327,6 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		return;
 	}
 
-	if (out.obtain_bufs(&fd)) {
-		fprintf(stderr, "%s: out.obtain_bufs failed\n", __func__);
-		return;
-	}
-
 	if (do_setup_out_buffers(fd, out, fout, true)) {
 		fprintf(stderr, "%s: do_setup_out_buffers failed\n", __func__);
 		return;
@@ -2343,7 +2355,6 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		FD_ZERO(&except_fds);
 		FD_SET(req_fd, &except_fds);
 		cv4l_buffer in_buf;
-		cv4l_buffer out_buf;
 		int fd_flags = fcntl(req_fd, F_GETFL);
 
 		fcntl(req_fd, F_SETFL, fd_flags | O_NONBLOCK);
@@ -2358,15 +2369,15 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 			return;
 		}
 		/*
-		 * it is safe to queue back a buffer only after
+		 * it is safe to queue back last cap buffer only after
 		 * the following request is done so that the buffer
 		 * is not needed anymore as a reference frame
 		 */
-		if (queue_lst_buf)
-			rc = fd.qbuf(last_in_buf);
-		if (rc) {
-			fprintf(stderr, "err queue last in buff\n");
-			return;
+		if (queue_lst_buf) {
+			if (fd.qbuf(last_in_buf) < 0) {
+				fprintf(stderr, "%s: qbuf failed\n", __func__);
+				return;
+			}
 		}
 		rc = do_handle_cap(fd, in, fin, NULL, count[CAP],
 				fps_ts[CAP], fmt[CAP], in_buf, false);
@@ -2380,16 +2391,9 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 			write_buffer_to_file(fd, in, in_buf, fmt[CAP], fout);
 
 		rc = do_handle_out(fd, out, fout, NULL, count[OUT],
-				   fps_ts[OUT], fmt[OUT], out_buf, false);
+				   fps_ts[OUT], fmt[OUT], false);
 		if (rc) {
 			fprintf(stderr, "%s: do_handle_out error\n", __func__);
-			return;
-		}
-		index = (index + 1) % in.g_buffers();
-		rc = ioctl(out.g_req_fd(index), MEDIA_REQUEST_IOC_REINIT, NULL);
-		if (rc < 0) {
-			fprintf(stderr, "Unable to reinit media request: %s\n",
-					strerror(errno));
 			return;
 		}
 		index = (index + 1) % in.g_buffers();
