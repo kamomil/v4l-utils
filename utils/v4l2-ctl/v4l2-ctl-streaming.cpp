@@ -89,6 +89,15 @@ static bool in_source_change_event;
 
 static __u64 last_fwht_bf_ts;
 
+struct request_fwht {
+	int fd;
+	__u64 ts;
+	struct v4l2_ctrl_fwht_params params;
+};
+
+static request_fwht fwht_reqs[VIDEO_MAX_FRAME];
+
+
 #define TS_WINDOW 241
 #define FILE_HDR_ID			v4l2_fourcc('V', 'h', 'd', 'r')
 
@@ -781,10 +790,59 @@ static void read_fwht_frame(cv4l_fmt &fmt, unsigned char *buf,
 		return;
 
 	struct fwht_cframe_hdr *h = (struct fwht_cframe_hdr*) buf;
+	printf("%s: wxh = %ux%u\n", __func__, ntohl(h->width), ntohl(h->height));
 	len += ntohl(h->size);
 
 	sz += fread(buf + sz, 1, ntohl(h->size), fpointer);
 }
+
+static void set_fwht_req_by_idx(unsigned idx, struct fwht_cframe_hdr *hdr,
+			       int req_fd, __u64 last_bf_ts, __u64 ts)
+{
+	struct v4l2_ctrl_fwht_params fwht_params;
+	memset(&fwht_params, 0, sizeof(fwht_params));
+	fwht_params.backward_ref_ts = last_bf_ts;
+	fwht_params.width = ntohl(hdr->width);
+	fwht_params.height = ntohl(hdr->height);
+
+	fwht_reqs[idx].fd = req_fd;
+	fwht_reqs[idx].ts = ts;
+	fwht_reqs[idx].params = fwht_params;
+	printf("%s: set %llu to idx %u req %d\n", __func__, ts, idx, req_fd);
+}
+
+static int get_fwht_req_by_ts(__u64 ts)
+{
+	printf("%s: search ts = %llu\n", __func__, ts);
+	for (int idx = 0; idx < VIDEO_MAX_FRAME; idx++) {
+		printf("%s: ts = %llu\n", __func__, fwht_reqs[idx].ts);
+		if (fwht_reqs[idx].ts == ts)
+			return idx;
+	}
+	return -1;
+}
+
+
+static void set_fwht_req_by_fd(struct fwht_cframe_hdr *hdr,
+		int req_fd, __u64 last_bf_ts, __u64 ts)
+{
+	struct v4l2_ctrl_fwht_params fwht_params;
+	memset(&fwht_params, 0, sizeof(fwht_params));
+	fwht_params.backward_ref_ts = last_bf_ts;
+	fwht_params.width = ntohl(hdr->width);
+	fwht_params.height = ntohl(hdr->height);
+
+	for (int idx = 0; idx < VIDEO_MAX_FRAME; idx++) {
+		if (fwht_reqs[idx].fd == req_fd) {
+			fwht_reqs[idx].ts = ts;
+			fwht_reqs[idx].params = fwht_params;
+			printf("%s: set %llu to idx %u req %d\n", __func__, ts, idx, req_fd);
+			return;
+		}
+	}
+	printf("%s: NO REQ  %d\n", __func__, req_fd);
+}
+
 
 static int set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
 			      __u64 last_bf_ts, int req_fd)
@@ -798,13 +856,13 @@ static int set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
 	memset(&controls, 0, sizeof(controls));
 
 	fwht_params.backward_ref_ts = last_bf_ts;
-	fwht_params.width = hdr->width;
-	fwht_params.height = hdr->height;
+	fwht_params.width = ntohl(hdr->width);
+	fwht_params.height = ntohl(hdr->height);
 
 	control.id = VICODEC_CID_STATELESS_FWHT;
 	control.ptr = &fwht_params;
 	control.size = sizeof(fwht_params);
-
+	printf("%s: wxh = %ux%u, ts = %llu\n", __func__, fwht_params.width, fwht_params.height, fwht_params.backward_ref_ts);
 	controls.which = V4L2_CTRL_WHICH_REQUEST_VAL;
 	controls.request_fd = req_fd;
 	controls.controls = &control;
@@ -825,6 +883,7 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 	unsigned char *plane_p = buf;
 	unsigned char *row_p;
 
+	printf("%s: start\n", __func__);
 	if (is_read) {
 		real_width  = cropped_width;
 		real_height = cropped_height;
@@ -832,6 +891,8 @@ static void read_write_padded_frame(cv4l_fmt &fmt, unsigned char *buf,
 		real_width  = composed_width;
 		real_height = composed_height;
 	}
+
+	printf("%s: real wxh = %ux%u immul = %u\n", __func__, real_width, real_height, vic_fmt->sizeimage_mult);
 
 	sz = 0;
 	len = real_width * real_height * vic_fmt->sizeimage_mult / vic_fmt->sizeimage_div;
@@ -1017,8 +1078,10 @@ restart:
 		b.s_bytesused(sz, j);
 		if (sz == len)
 			continue;
-		if (sz == 0)
+		if (sz == 0) {
+			fprintf(stderr, "%s: sz = 0\n", __func__);
 			return false;
+		}
 		if (sz)
 			fprintf(stderr, "%u != %u\n", sz, len);
 		continue;
@@ -1132,6 +1195,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			return -2;
 
 		if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
+			printf("%s: REQ supported\n", __func__);
 			int media_fd = mi_get_media_fd(fd.g_fd());
 
 			if(media_fd < 0) {
@@ -1139,7 +1203,10 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 				return media_fd;
 			}
 
-			q.alloc_req(media_fd, i);
+			if (q.alloc_req(media_fd, i)) {
+				fprintf(stderr, "%s: q.alloc_req failed\n", __func__);
+				return -1;
+			}
 			buf.s_request_fd(q.g_req_fd(i));
 			buf.or_flags(V4L2_BUF_FLAG_REQUEST_FD);
 
@@ -1147,6 +1214,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 				struct fwht_cframe_hdr *hdr =
 					(struct fwht_cframe_hdr*)q.g_dataptr(buf.g_index(), j);
 				int ret = set_fwht_ext_ctrl(fd, hdr, last_fwht_bf_ts, buf.g_request_fd());
+				printf("%s: ret = %d\n", __func__, ret);
 				if (ret) {
 					fprintf(stderr, "%s: set_fwht_ext_ctrls failed on %dth buf\n", __func__, i);
 					fprintf(stderr, "%s: with error %s\n", __func__, strerror(errno));
@@ -1155,8 +1223,8 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			}
 		}
 		if (qbuf) {
+			printf("%s: queueing\n", __func__);
 			set_time_stamp(buf);
-			last_fwht_bf_ts = get_ns_time_stamp(buf);
 			if (fd.qbuf(buf))
 				return -1;
 			tpg_update_mv_count(&tpg, V4L2_FIELD_HAS_T_OR_B(field));
@@ -1165,14 +1233,23 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 			fflush(stderr);
 		}
 		if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
+			struct fwht_cframe_hdr *hdr =
+				(struct fwht_cframe_hdr*)q.g_dataptr(buf.g_index(), 0);
+
 			printf("%s: about to queue request %d, fd is %d\n", __func__, i, q.g_req_fd(i));
-			getchar();
+			//getchar();
+			set_fwht_req_by_idx(i, hdr, q.g_req_fd(i),
+					    last_fwht_bf_ts, get_ns_time_stamp(buf));
+			last_fwht_bf_ts = get_ns_time_stamp(buf);
 			int rc = ioctl(q.g_req_fd(i), MEDIA_REQUEST_IOC_QUEUE);
 			if (rc < 0) {
 				fprintf(stderr, "Unable to queue media request: %s\n",
 						strerror(errno));
 				return rc;
 			}
+		} else {
+			printf("%s: REQ NOT SUPPORT\n", __func__);
+
 		}
 	}
 	if (qbuf)
@@ -1187,6 +1264,7 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf,
 	unsigned comp_size[VIDEO_MAX_PLANES];
 	__u8 *comp_ptr[VIDEO_MAX_PLANES];
 
+	printf("%s: start\n", __func__);
 	if (host_fd_to >= 0) {
 		unsigned tot_comp_size = 0;
 		unsigned tot_used = 0;
@@ -1246,6 +1324,7 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf,
 		else
 			sz = fwrite((u8 *)q.g_dataptr(buf.g_index(), j) + offset, 1, used, fout);
 
+		printf("%s: %u %u\n", __func__, sz, used);
 		if (sz != used)
 			fprintf(stderr, "%u != %u\n", sz, used);
 	}
@@ -1268,6 +1347,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 	 */
 	bool ignore_count_skip = fd.has_vid_m2m();
 
+	printf("%s: start\n", __func__);
 	for (;;) {
 		ret = fd.dqbuf(buf);
 		if (ret == EAGAIN)
@@ -1291,6 +1371,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 		if (!qbuf)
 			return 0;
 	}
+	printf("%s: without ERR\n", __func__);
 
 	double ts_secs = buf.g_timestamp().tv_sec + buf.g_timestamp().tv_usec / 1000000.0;
 	fps_ts.add_ts(ts_secs, buf.g_sequence(), buf.g_field());
@@ -1342,7 +1423,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 		}
 	}
 	count++;
-
+	printf("%s: count = %d\n", __func__, count);
 	if (ignore_count_skip)
 		return 0;
 
@@ -1420,7 +1501,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 		printf("%s: req_fd flag: %s, req fd = %d\n", __func__,
 		       buf.g_flags() & V4L2_BUF_FLAG_REQUEST_FD ? "ok" : "NOT Ok",
 		       buf.g_request_fd());
-		if (ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_REINIT, NULL) < 0) {
+		if (ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_REINIT, NULL)) {
 			fprintf(stderr, "Unable to reinit media request: %s\n",
 					strerror(errno));
 			return -1;
@@ -1437,7 +1518,6 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 	}
 
 	set_time_stamp(buf);
-	last_fwht_bf_ts = get_ns_time_stamp(buf);
 
 	if (qbuf && fd.qbuf(buf)) {
 		fprintf(stderr, "%s: failed: %s\n", "VIDIOC_QBUF", strerror(errno));
@@ -1445,7 +1525,11 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 	}
 	if (q.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS) {
 		printf("%s: about to queue request, fd is %d\n", __func__, buf.g_request_fd());
-		getchar();
+		//getchar();
+		struct fwht_cframe_hdr* hdr = (struct fwht_cframe_hdr*)q.g_dataptr(buf.g_index(), 0);
+		set_fwht_req_by_fd(hdr,buf.g_request_fd(), last_fwht_bf_ts, get_ns_time_stamp(buf));
+
+		last_fwht_bf_ts = get_ns_time_stamp(buf);
 		int rc = ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_QUEUE);
 		if (rc < 0) {
 			fprintf(stderr, "Unable to queue media request: %s\n",
@@ -1505,6 +1589,8 @@ static int do_handle_out_to_in(cv4l_fd &out_fd, cv4l_fd &fd, cv4l_queue &out, cv
 static FILE *open_output_file(cv4l_fd &fd)
 {
 	FILE *fout = NULL;
+
+	printf("%s: start\n", __func__);
 
 #ifndef NO_STREAM_TO
 	if (file_to) {
@@ -1769,6 +1855,8 @@ done:
 static FILE *open_input_file(cv4l_fd &fd, __u32 type)
 {
 	FILE *fin = NULL;
+
+	printf("%s: start\n", __func__);
 
 	if (file_from) {
 		if (!strcmp(file_from, "-"))
@@ -2082,6 +2170,8 @@ static void statefull_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	bool cap_streaming = false;
 	cv4l_fmt fmt[2];
 
+	printf("%s: start\n", __func__);
+	//exit(1);
 	fd.g_fmt(fmt[OUT], out.g_type());
 	fd.g_fmt(fmt[CAP], in.g_type());
 
@@ -2251,6 +2341,7 @@ static void statefull_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 static bool probe_fwht_header(struct fwht_cframe_hdr *hdr, FILE *fpointer)
 {
 	long offset = ftell(fpointer);
+	printf("%s: offst = %ld\n", __func__, offset);
 	if (offset < 0)
 		return false;
 	if (fread(hdr, sizeof(struct fwht_cframe_hdr), 1, fpointer) != 1)
@@ -2285,6 +2376,7 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	struct timeval tv = { 2, 0 };
 
 	printf("%s: start\n", __func__);
+	//exit(1);
 	struct fwht_cframe_hdr hdr;
 	if (!probe_fwht_header(&hdr, fout)) {
 		fprintf(stderr, "%s probe_fwht_header failed: %s\n", __func__, strerror(errno));
@@ -2293,10 +2385,10 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 
 	//TODO
 	//fmt[CAP].s_pixelformat(cap_pixelformat);
-	fmt[CAP].s_width(hdr.width);
-	fmt[CAP].s_height(hdr.height);
-	fd.s_fmt(fmt[CAP], in.g_type());
-	fd.g_fmt(fmt[CAP], in.g_type());
+	//fmt[CAP].s_width(ntohl(hdr.width));
+	//fmt[CAP].s_height(ntohl(hdr.height));
+	//fd.s_fmt(fmt[CAP], in.g_type());
+	//fd.g_fmt(fmt[CAP], in.g_type());
 
 	v4l2_selection sel;
 
@@ -2309,10 +2401,14 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		fprintf(stderr, "%s: s_selection for capture failed\n", __func__);
 		return;
 	}
+	printf("%s: about to out.reqbufs\n", __func__);
+	////getchar();
 	if (out.reqbufs(&fd, reqbufs_count_out)) {
 		fprintf(stderr, "%s: out.reqbufs failed\n", __func__);
 		return;
 	}
+	printf("%s: about to in.reqbufs\n", __func__);
+	///getchar();
 	
 	if (in.reqbufs(&fd, reqbufs_count_cap)) {
 		fprintf(stderr, "%s: in.reqbufs failed\n", __func__);
@@ -2322,25 +2418,36 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	if (exp_fd_p && in.export_bufs(exp_fd_p, exp_fd_p->g_type()))
 		return;
 
+	printf("%s: about to in obtain\n", __func__);
+	//getchar();
 	if (in.obtain_bufs(&fd)) {
 		fprintf(stderr, "%s: in.obtain_bufs error\n", __func__);
 		return;
 	}
 
+
+	printf("%s: about to do_setup_out_buffers\n", __func__);
+	//getchar();
 	if (do_setup_out_buffers(fd, out, fout, true)) {
 		fprintf(stderr, "%s: do_setup_out_buffers failed\n", __func__);
 		return;
 	}
 
+	printf("%s: about to in.queueall\n", __func__);
+	//getchar();
 	if (in.queue_all(&fd)) {
 		fprintf(stderr, "%s: in.queue_all failed\n", __func__);
 		return;
 	}
 
+	printf("%s: about to out streamon\n", __func__);
+	//getchar();
 	if (fd.streamon(out.g_type())) {
 		fprintf(stderr, "%s: streamon for out failed\n", __func__);
 		return;
 	}
+	printf("%s: about to in streamon\n", __func__);
+	//getchar();
 	if (fd.streamon(in.g_type())) {
 		fprintf(stderr, "%s: streamon for in failed\n", __func__);
 		return;
@@ -2359,6 +2466,7 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 
 		fcntl(req_fd, F_SETFL, fd_flags | O_NONBLOCK);
 
+		printf("%s: selecting req_fd %d\n", __func__, req_fd);
 		int rc = select(req_fd + 1, NULL, NULL, &except_fds, &tv);
 		if (rc == 0) {
 			fprintf(stderr, "Timeout when waiting for media request\n");
@@ -2379,7 +2487,7 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 				return;
 			}
 		}
-		rc = do_handle_cap(fd, in, fin, NULL, count[CAP],
+		rc = do_handle_cap(fd, in, NULL, NULL, count[CAP],
 				fps_ts[CAP], fmt[CAP], in_buf, false);
 		if (rc) {
 			fprintf(stderr, "%s: do_handle_cap err\n", __func__);
@@ -2387,11 +2495,20 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		}
 		last_in_buf = in_buf;
 		queue_lst_buf = true;
-		if (fout && in_buf.g_bytesused(0) && !(in_buf.g_flags() & V4L2_BUF_FLAG_ERROR))
-			write_buffer_to_file(fd, in, in_buf, fmt[CAP], fout);
+		if (fin && in_buf.g_bytesused(0) && !(in_buf.g_flags() & V4L2_BUF_FLAG_ERROR)) {
+		
+			int idx = get_fwht_req_by_ts(get_ns_time_stamp(in_buf));
+			if (idx < 0) {
+				fprintf(stderr, "%s: could not find request from buffer\n", __func__);
+				return;
+			}
+			composed_width = fwht_reqs[idx].params.width;
+			composed_height = fwht_reqs[idx].params.height;
+			write_buffer_to_file(fd, in, in_buf, fmt[CAP], fin);
+		}
 
 		rc = do_handle_out(fd, out, fout, NULL, count[OUT],
-				   fps_ts[OUT], fmt[OUT], false);
+				   fps_ts[OUT], fmt[OUT], true);
 		if (rc) {
 			fprintf(stderr, "%s: do_handle_out error\n", __func__);
 			return;
@@ -2408,6 +2525,8 @@ static void streaming_set_m2m(cv4l_fd &fd, cv4l_fd &exp_fd)
 	cv4l_queue exp_q(exp_fd.g_type(), V4L2_MEMORY_MMAP);
 	cv4l_fd *exp_fd_p = NULL;
 	FILE *file[2] = {NULL, NULL};
+
+	printf("%s: start\n", __func__);
 
 	if (!fd.has_vid_m2m()) {
 		fprintf(stderr, "unsupported m2m stream type\n");
@@ -2437,9 +2556,12 @@ static void streaming_set_m2m(cv4l_fd &fd, cv4l_fd &exp_fd)
 		if (out.export_bufs(&exp_fd, exp_fd.g_type()))
 			return;
 	}
-
+	printf("%s: about the req bufs\n", __func__);
+	//getchar();
 	if (out.reqbufs(&fd, 0))
 		goto done;
+	printf("%s: after the req bufs\n", __func__);
+	//getchar();
 	if (out.g_capabilities() & V4L2_BUF_CAP_SUPPORTS_REQUESTS)
 		stateless_m2m(fd, in, out, file[CAP], file[OUT], exp_fd_p);
 	else
@@ -2594,12 +2716,11 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 				fprintf(stderr, "handle cap %d\n", r);
 			if (!r) {
 				cv4l_buffer buf(in, index);
-				cv4l_buffer out_buf;
 				if (fd.querybuf(buf))
 					break;
 				r = do_handle_out(out_fd, out, file[OUT], &buf,
-						  count[OUT], fps_ts[OUT], fmt[OUT],
-						  out_buf, true);
+						  count[OUT], fps_ts[OUT],
+						  fmt[OUT], true);
 			}
 			if (r)
 				fprintf(stderr, "handle out %d\n", r);
