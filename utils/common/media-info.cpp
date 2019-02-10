@@ -208,16 +208,21 @@ int mi_get_media_fd(int fd, const char *bus_info)
 	if (mi_get_dev_t_from_fd(fd, &dev) < 0)
 		return -1;
 
+	printf("%s: maj = %u, manor = %u\n", __func__, major(dev), minor(dev));
 	std::string media_path("/sys/dev/char/");
 
 	media_path += num2s(major(dev), false) + ":" +
 		num2s(minor(dev), false) + "/device";
 
+	printf("%s: path = %s\n", __func__, media_path.c_str());
+
 	DIR *dp;
 	struct dirent *ep;
 	dp = opendir(media_path.c_str());
-	if (dp == NULL)
+	if (dp == NULL) {
+		fprintf(stderr, "failed to open dir %s\n", media_path.c_str());
 		return -1;
+	}
 	media_path[0] = 0;
 	while ((ep = readdir(dp))) {
 		if (!memcmp(ep->d_name, "media", 5) && isdigit(ep->d_name[5])) {
@@ -226,7 +231,9 @@ int mi_get_media_fd(int fd, const char *bus_info)
 
 			devname += ep->d_name;
 			media_fd = open(devname.c_str(), O_RDWR);
-
+			if(media_fd < 0) {
+				fprintf(stderr, "failed to open %s: %s\n", devname.c_str(), strerror(errno));
+			}
 			if (bus_info &&
 			    (ioctl(media_fd, MEDIA_IOC_DEVICE_INFO, &mdinfo) ||
 			     strcmp(mdinfo.bus_info, bus_info))) {
