@@ -440,8 +440,6 @@ static int get_out_crop_rect(cv4l_fd &fd)
 
 static __u64 get_ns_time_stamp(cv4l_buffer &buf)
 {
-	if ((buf.g_flags() & V4L2_BUF_FLAG_TIMESTAMP_MASK) != V4L2_BUF_FLAG_TIMESTAMP_COPY)
-		return 0;
 	const struct timeval tv = buf.g_timestamp();
 	return v4l2_timeval_to_ns(&tv);
 }
@@ -449,7 +447,7 @@ static __u64 get_ns_time_stamp(cv4l_buffer &buf)
 
 static void set_time_stamp(cv4l_buffer &buf)
 {
-	if ((buf.g_flags() & V4L2_BUF_FLAG_TIMESTAMP_MASK) != V4L2_BUF_FLAG_TIMESTAMP_COPY)
+	if (!buf.ts_is_copy())
 		return;
 	buf.s_timestamp_clock();
 }
@@ -1442,8 +1440,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 }
 
 static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap,
-			 unsigned &count, fps_timestamps &fps_ts,
-			 cv4l_fmt fmt, bool qbuf)
+			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt fmt)
 {
 	cv4l_buffer buf(q);
 	int ret = 0;
@@ -1519,7 +1516,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 
 	set_time_stamp(buf);
 
-	if (qbuf && fd.qbuf(buf)) {
+	if (fd.qbuf(buf)) {
 		fprintf(stderr, "%s: failed: %s\n", "VIDIOC_QBUF", strerror(errno));
 		return -1;
 	}
@@ -2083,7 +2080,7 @@ static void streaming_set_out(cv4l_fd &fd, cv4l_fd &exp_fd)
 			}
 		}
 		r = do_handle_out(fd, q, fin, NULL,
-				   count, fps_ts, fmt, true);
+				   count, fps_ts, fmt);
 		if (r == -1)
 			break;
 
@@ -2264,8 +2261,7 @@ static void statefull_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 
 		if (wr_fds && FD_ISSET(fd.g_fd(), wr_fds)) {
 			r = do_handle_out(fd, out, fout, NULL,
-					  count[OUT], fps_ts[OUT],
-					  fmt[OUT], true);
+					  count[OUT], fps_ts[OUT], fmt[OUT]);
 			if (r < 0)  {
 				wr_fds = NULL;
 
@@ -2335,36 +2331,6 @@ static void statefull_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	tpg_free(&tpg);
 }
 
-/*
- * non consuming reading of the frame header
- */
-static bool probe_fwht_header(struct fwht_cframe_hdr *hdr, FILE *fpointer)
-{
-	long offset = ftell(fpointer);
-	printf("%s: offst = %ld\n", __func__, offset);
-	if (offset < 0)
-		return false;
-	if (fread(hdr, sizeof(struct fwht_cframe_hdr), 1, fpointer) != 1)
-		return false;
-	if (fseek(fpointer, offset, SEEK_SET) != 0)
-		return false;
-	return true;
-}
-/*
-struct fwht_cframe_hdr {
-	u32 magic1;
-	u32 magic2;
-	__be32 version;
-	__be32 width, height;
-	__be32 flags;
-	__be32 colorspace;
-	__be32 xfer_func;
-	__be32 ycbcr_enc;
-	__be32 quantization;
-	__be32 size;
-};
-*/
-
 static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 			  FILE *fin, FILE *fout, cv4l_fd *exp_fd_p)
 {
@@ -2376,31 +2342,6 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	struct timeval tv = { 2, 0 };
 
 	printf("%s: start\n", __func__);
-	//exit(1);
-	struct fwht_cframe_hdr hdr;
-	if (!probe_fwht_header(&hdr, fout)) {
-		fprintf(stderr, "%s probe_fwht_header failed: %s\n", __func__, strerror(errno));
-		return;
-	}
-
-	//TODO
-	//fmt[CAP].s_pixelformat(cap_pixelformat);
-	//fmt[CAP].s_width(ntohl(hdr.width));
-	//fmt[CAP].s_height(ntohl(hdr.height));
-	//fd.s_fmt(fmt[CAP], in.g_type());
-	//fd.g_fmt(fmt[CAP], in.g_type());
-
-	v4l2_selection sel;
-
-	memset(&sel, 0, sizeof(sel));
-	sel.type = vidcap_buftype;
-	sel.target = V4L2_SEL_TGT_COMPOSE;
-	sel.r.width = hdr.width;
-	sel.r.height = hdr.height;
-	if (fd.s_selection(sel) == 0) {
-		fprintf(stderr, "%s: s_selection for capture failed\n", __func__);
-		return;
-	}
 	printf("%s: about to out.reqbufs\n", __func__);
 	////getchar();
 	if (out.reqbufs(&fd, reqbufs_count_out)) {
@@ -2508,7 +2449,7 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		}
 
 		rc = do_handle_out(fd, out, fout, NULL, count[OUT],
-				   fps_ts[OUT], fmt[OUT], true);
+				   fps_ts[OUT], fmt[OUT]);
 		if (rc) {
 			fprintf(stderr, "%s: do_handle_out error\n", __func__);
 			return;
@@ -2719,8 +2660,7 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 				if (fd.querybuf(buf))
 					break;
 				r = do_handle_out(out_fd, out, file[OUT], &buf,
-						  count[OUT], fps_ts[OUT],
-						  fmt[OUT], true);
+						  count[OUT], fps_ts[OUT], fmt[OUT]);
 			}
 			if (r)
 				fprintf(stderr, "handle out %d\n", r);
