@@ -1156,11 +1156,12 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf,
 }
 
 static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
-			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt &fmt)
+			 unsigned &count, fps_timestamps &fps_ts, cv4l_fmt &fmt,
+			 cv4l_buffer &buf, bool qbuf)
 {
 	char ch = '<';
 	int ret;
-	cv4l_buffer buf(q);
+	buf.init(q);
 
 	/*
 	 * The stream_count and stream_skip does not apply to capture path of
@@ -1186,14 +1187,18 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 			break;
 		if (verbose)
 			print_concise_buffer(stderr, buf, fps_ts, -1);
-		if (fd.qbuf(buf))
+		if (qbuf && fd.qbuf(buf))
 			return -1;
+		if (!qbuf)
+			return 0;
 	}
-	
 	double ts_secs = buf.g_timestamp().tv_sec + buf.g_timestamp().tv_usec / 1000000.0;
 	fps_ts.add_ts(ts_secs, buf.g_sequence(), buf.g_field());
 
-	if (fout && (!stream_skip || ignore_count_skip) &&
+	/*
+	 * if qbuf is false then the called should call write_buffer_to_file
+	 */
+	if (qbuf && fout && (!stream_skip || ignore_count_skip) &&
 	    buf.g_bytesused(0) && !(buf.g_flags() & V4L2_BUF_FLAG_ERROR))
 		write_buffer_to_file(fd, q, buf, fmt, fout);
 
@@ -1208,7 +1213,7 @@ static int do_handle_cap(cv4l_fd &fd, cv4l_queue &q, FILE *fout, int *index,
 				     host_fd_to >= 0 ? 100 - comp_perc / comp_perc_count : -1);
 		comp_perc_count = comp_perc = 0;
 	}
-	if (!last_buffer && index == NULL) {
+	if (qbuf && !last_buffer && index == NULL) {
 		/*
 		 * EINVAL in qbuf can happen if this is the last buffer before
 		 * a dynamic resolution change sequence. In this case the buffer
@@ -1604,8 +1609,10 @@ recover:
 		}
 
 		if (FD_ISSET(fd.g_fd(), &read_fds)) {
+			cv4l_buffer buf;
+
 			r = do_handle_cap(fd, q, fout, NULL,
-					   count, fps_ts, fmt);
+					   count, fps_ts, fmt, buf, true);
 			if (r == -1)
 				break;
 		}
@@ -2024,8 +2031,10 @@ static void stateful_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 		}
 
 		if (rd_fds && FD_ISSET(fd.g_fd(), rd_fds)) {
-			r = do_handle_cap(fd, in, fin, NULL,
-					  count[CAP], fps_ts[CAP], fmt[CAP]);
+			cv4l_buffer buf;
+
+			r = do_handle_cap(fd, in, fin, NULL, count[CAP],
+					  fps_ts[CAP], fmt[CAP], buf, true);
 			if (r < 0) {
 				rd_fds = NULL;
 				if (!have_eos) {
@@ -2286,14 +2295,14 @@ static void streaming_set_cap2out(cv4l_fd &fd, cv4l_fd &out_fd)
 
 		if (FD_ISSET(fd.g_fd(), &fds)) {
 			int index = -1;
+			cv4l_buffer buf;
 
-			r = do_handle_cap(fd, in, file[CAP], &index,
-					  count[CAP], fps_ts[CAP], fmt[CAP]);
+			r = do_handle_cap(fd, in, file[CAP], &index, count[CAP],
+					  fps_ts[CAP], fmt[CAP], buf, true);
 			if (r)
 				fprintf(stderr, "handle cap %d\n", r);
 			if (!r) {
 				cv4l_buffer buf(in, index);
-
 				if (fd.querybuf(buf))
 					break;
 				r = do_handle_out(out_fd, out, file[OUT], &buf,
