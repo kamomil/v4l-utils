@@ -10,6 +10,7 @@
 #define _V4L_HELPERS_H_
 
 #include <linux/videodev2.h>
+#include <linux/media.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1414,6 +1415,7 @@ struct v4l_queue {
 	void *mmappings[VIDEO_MAX_FRAME][VIDEO_MAX_PLANES];
 	unsigned long userptrs[VIDEO_MAX_FRAME][VIDEO_MAX_PLANES];
 	int fds[VIDEO_MAX_FRAME][VIDEO_MAX_PLANES];
+	int req_fds[VIDEO_MAX_FRAME];
 };
 
 static inline void v4l_queue_init(struct v4l_queue *q,
@@ -1443,6 +1445,11 @@ static inline __u32 v4l_queue_g_length(const struct v4l_queue *q, unsigned plane
 static inline __u32 v4l_queue_g_mem_offset(const struct v4l_queue *q, unsigned index, unsigned plane)
 {
 	return q->mem_offsets[index][plane];
+}
+
+static inline unsigned v4l_queue_g_req_fd(const struct v4l_queue *q, unsigned index)
+{
+	return q->req_fds[index];
 }
 
 static inline void v4l_queue_s_mmapping(struct v4l_queue *q, unsigned index, unsigned plane, void *m)
@@ -1700,6 +1707,21 @@ static inline int v4l_queue_export_bufs(struct v4l_fd *f, struct v4l_queue *q,
 	}
 	return 0;
 }
+
+static inline int v4l_queue_alloc_req(struct v4l_queue *q, int media_fd, unsigned index)
+{
+	int rc = 0;
+
+	rc = ioctl(media_fd, MEDIA_IOC_REQUEST_ALLOC, &q->req_fds[index]);
+	if (rc < 0) {
+		fprintf(stderr, "Unable to allocate media request: %s\n",
+			strerror(errno));
+		return rc;
+	}
+
+	return 0;
+}
+
 
 static inline void v4l_queue_close_exported_fds(struct v4l_queue *q)
 {
