@@ -2325,47 +2325,101 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	unsigned count[2] = { 0, 0 };
 	cv4l_fmt fmt[2];
 	int fd_flags = fcntl(fd.g_fd(), F_GETFL);
+	cv4l_fmt xfmt;
 
 	fd.g_fmt(fmt[OUT], out.g_type());
 	fd.g_fmt(fmt[CAP], in.g_type());
+	struct timespec ts;
 
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	unsigned t = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec * 1000;
+//	unsigned t = v4l2_timeval_to_ns(&ts);
+
+	//srand((unsigned)time(0));
+	srand(t);
+again:
+	int r = (rand()%10);
+	printf("%s: got %d\n", __func__, r);
+	switch(r) {
+		case 0:
+			goto a0;
+		case 1:
+			goto a1;
+		case 2:
+			goto a2;
+		case 3:
+			goto a3;
+		case 4:
+			goto a4;
+		case 5:
+			goto a5;
+		case 6:
+			goto a6;
+		case 7:
+			goto a7;
+		case 8:
+			goto a8;
+		case 9:
+			goto a9;
+	}
+a0:
 	if (out.reqbufs(&fd, reqbufs_count_out)) {
 		fprintf(stderr, "%s: out.reqbufs failed\n", __func__);
 		return;
 	}
-
+	goto again;
+a1:
 	if (in.reqbufs(&fd, reqbufs_count_cap)) {
 		fprintf(stderr, "%s: in.reqbufs failed\n", __func__);
 		return;
 	}
+	goto again;
+a2:
 
 	if (exp_fd_p && in.export_bufs(exp_fd_p, exp_fd_p->g_type()))
 		return;
+	goto again;
+a3:
 
 	if (in.obtain_bufs(&fd)) {
 		fprintf(stderr, "%s: in.obtain_bufs error\n", __func__);
 		return;
 	}
+	goto again;
+a4:
 
 	if (do_setup_out_buffers(fd, out, fout, true)) {
 		fprintf(stderr, "%s: do_setup_out_buffers failed\n", __func__);
 		return;
 	}
+	goto again;
+a5:
 
 	if (in.queue_all(&fd)) {
 		fprintf(stderr, "%s: in.queue_all failed\n", __func__);
 		return;
 	}
+	goto again;
+a6:
 
 	if (fd.streamon(out.g_type())) {
 		fprintf(stderr, "%s: streamon for out failed\n", __func__);
 		return;
 	}
+	goto again;
+a7:
 
 	if (fd.streamon(in.g_type())) {
 		fprintf(stderr, "%s: streamon for in failed\n", __func__);
 		return;
 	}
+	goto again;
+a8:
+	if (vidcap_get_and_update_fmt(fd, xfmt) == 0) {
+			doioctl(fd.g_fd(), VIDIOC_S_FMT, &xfmt);
+	}
+	goto again;
+a9:
 	int index = 0;
 	bool queue_lst_buf = false;
 	cv4l_buffer last_in_buf;
