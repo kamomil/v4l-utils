@@ -82,6 +82,7 @@ static unsigned int composed_height;
 static bool support_cap_compose;
 static bool support_out_crop;
 static bool in_source_change_event;
+static bool is_stateless;
 
 static __u64 last_fwht_bf_ts;
 static fwht_cframe_hdr last_fwht_hdr;
@@ -837,7 +838,7 @@ static int alloc_fwht_req(int media_fd, unsigned index)
 	return 0;
 }
 
-static void set_fwht_req_by_idx(unsigned idx, struct fwht_cframe_hdr *hdr,
+static void set_fwht_req_by_idx(unsigned idx, const struct fwht_cframe_hdr *hdr,
 				__u64 last_bf_ts, __u64 ts)
 {
 	struct v4l2_ctrl_fwht_params fwht_params;
@@ -857,7 +858,7 @@ static int get_fwht_req_by_ts(__u64 ts)
 	return -1;
 }
 
-static bool set_fwht_req_by_fd(struct fwht_cframe_hdr *hdr,
+static bool set_fwht_req_by_fd(const struct fwht_cframe_hdr *hdr,
 			       int req_fd, __u64 last_bf_ts, __u64 ts)
 {
 	struct v4l2_ctrl_fwht_params fwht_params;
@@ -874,7 +875,7 @@ static bool set_fwht_req_by_fd(struct fwht_cframe_hdr *hdr,
 	return false;
 }
 
-static int set_fwht_ext_ctrl(cv4l_fd &fd, struct fwht_cframe_hdr *hdr,
+static int set_fwht_ext_ctrl(cv4l_fd &fd, const struct fwht_cframe_hdr *hdr,
 			     __u64 last_bf_ts, int req_fd)
 {
 	v4l2_ext_controls controls;
@@ -1140,8 +1141,10 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 	bool is_video = q.g_type() == V4L2_BUF_TYPE_VIDEO_OUTPUT ||
 			q.g_type() == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 
-	if (q.obtain_bufs(&fd))
+	if (q.obtain_bufs(&fd)) {
+		printf("%s: q.obtain_bufs\n", __func__);
 		return QUEUE_ERROR;
+	}
 
 	fd.g_fmt(fmt, q.g_type());
 	if (fd.g_std(stream_out_std)) {
@@ -1210,8 +1213,10 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 	for (unsigned i = 0; i < q.g_buffers(); i++) {
 		cv4l_buffer buf(q);
 
-		if (fd.querybuf(buf, i))
+		if (fd.querybuf(buf, i)) {
+			printf("%s: q.obtain_bufs\n", __func__);
 			return QUEUE_ERROR;
+		}
 
 		buf.update(q, i);
 		for (unsigned j = 0; j < q.g_num_planes(); j++)
@@ -1234,7 +1239,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 		if (fin && !fill_buffer_from_file(fd, q, buf, fmt, fin))
 			return QUEUE_STOPPED;
 
-		if (fmt.g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS) {
+		if (is_stateless) {
 			int media_fd = mi_get_media_fd(fd.g_fd());
 
 			if (media_fd < 0) {
@@ -1242,14 +1247,16 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 				return media_fd;
 			}
 
-			if (alloc_fwht_req(media_fd, i))
+			if (alloc_fwht_req(media_fd, i)) {
+				printf("%s: q.obtain_bufs\n", __func__);
 				return QUEUE_ERROR;
+			}
 			buf.s_request_fd(fwht_reqs[i].fd);
 			buf.or_flags(V4L2_BUF_FLAG_REQUEST_FD);
 
 			if (set_fwht_ext_ctrl(fd, &last_fwht_hdr, last_fwht_bf_ts,
 					      buf.g_request_fd())) {
-				fprintf(stderr, "%s: set_fwht_ext_ctrls failed on %dth buf: %s\n",
+				fprintf(stderr, "%s: set_fwht_ext_ctrl failed on %dth buf: %s\n",
 					__func__, i, strerror(errno));
 				return QUEUE_ERROR;
 			}
@@ -1268,7 +1275,7 @@ static int do_setup_out_buffers(cv4l_fd &fd, cv4l_queue &q, FILE *fin, bool qbuf
 				if (!--stream_count)
 					return QUEUE_STOPPED;
 		}
-		if (fmt.g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS) {
+		if (is_stateless) {
 			set_fwht_req_by_idx(i, &last_fwht_hdr,
 					    last_fwht_bf_ts, buf.g_timestamp_ns());
 			last_fwht_bf_ts = buf.g_timestamp_ns();
@@ -1349,7 +1356,6 @@ static void write_buffer_to_file(cv4l_fd &fd, cv4l_queue &q, cv4l_buffer &buf,
 						fout, sz, used, used, false);
 		else
 			sz = fwrite((u8 *)q.g_dataptr(buf.g_index(), j) + offset, 1, used, fout);
-
 		if (sz != used)
 			fprintf(stderr, "%u != %u\n", sz, used);
 	}
@@ -1530,7 +1536,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 				       (u8 *)q.g_dataptr(buf.g_index(), j));
 	}
 
-	if (fmt.g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS) {
+	if (is_stateless) {
 		if (ioctl(buf.g_request_fd(), MEDIA_REQUEST_IOC_REINIT, NULL)) {
 			fprintf(stderr, "Unable to reinit media request: %s\n",
 				strerror(errno));
@@ -1539,7 +1545,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 
 		if (set_fwht_ext_ctrl(fd, &last_fwht_hdr, last_fwht_bf_ts,
 				      buf.g_request_fd())) {
-			fprintf(stderr, "%s: set_fwht_ext_ctrls failed: %s\n",
+			fprintf(stderr, "%s: set_fwht_ext_ctrl failed: %s\n",
 				__func__, strerror(errno));
 			return QUEUE_ERROR;
 		}
@@ -1551,7 +1557,7 @@ static int do_handle_out(cv4l_fd &fd, cv4l_queue &q, FILE *fin, cv4l_buffer *cap
 		fprintf(stderr, "%s: failed: %s\n", "VIDIOC_QBUF", strerror(errno));
 		return QUEUE_ERROR;
 	}
-	if (fmt.g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS) {
+	if (is_stateless) {
 		if (!set_fwht_req_by_fd(&last_fwht_hdr, buf.g_request_fd(), last_fwht_bf_ts,
 					buf.g_timestamp_ns())) {
 			fprintf(stderr, "%s: request for fd %d does not exist\n",
@@ -2392,7 +2398,13 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 	unsigned count[2] = { 0, 0 };
 	int fd_flags = fcntl(fd.g_fd(), F_GETFL);
 	bool stopped = false;
+	enum codec_type codec_type = get_codec_type(fd);
 
+	if (codec_type == ENCODER) {
+		printf("%d\n", fmt_out.g_width());
+		last_fwht_hdr.width = htonl(cropped_width);
+		last_fwht_hdr.height = htonl(cropped_height);
+	}
 	if (out.reqbufs(&fd, reqbufs_count_out)) {
 		fprintf(stderr, "%s: out.reqbufs failed\n", __func__);
 		return;
@@ -2436,6 +2448,7 @@ static void stateless_m2m(cv4l_fd &fd, cv4l_queue &in, cv4l_queue &out,
 
 	fcntl(fd.g_fd(), F_SETFL, fd_flags | O_NONBLOCK);
 
+	printf("%s\n", __func__);
 	while (true) {
 		fd_set except_fds;
 		int req_fd = fwht_reqs[index].fd;
@@ -2576,7 +2589,9 @@ static void streaming_set_m2m(cv4l_fd &fd, cv4l_fd &exp_fd)
 		if (out.export_bufs(&exp_fd, exp_fd.g_type()))
 			goto done;
 	}
-	if (fmt[OUT].g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS)
+	is_stateless = fmt[OUT].g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS ||
+		       fmt[CAP].g_pixelformat() == V4L2_PIX_FMT_FWHT_STATELESS;
+	if (is_stateless)
 		stateless_m2m(fd, in, out, file[CAP], file[OUT], fmt[CAP], fmt[OUT], exp_fd_p);
 	else
 		stateful_m2m(fd, in, out, file[CAP], file[OUT], fmt[CAP], fmt[OUT], exp_fd_p);
